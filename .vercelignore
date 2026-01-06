@@ -1,0 +1,36 @@
+# Dependencies (will be installed by Vercel)
+node_modules/
+
+# Build output (will be built by Vercel)
+dist/
+
+# Environment files (use Vercel dashboard instead)
+.env
+.env.local
+.env.production
+
+# Logs
+logs/
+*.log
+
+# Uploads (use cloud storage instead)
+uploads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Development files
+nodemon.json
+stop-servers.ps1
+
+# Documentation
+*.md
+!README.md
+

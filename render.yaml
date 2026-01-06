@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: delivery-network-backend
+    env: node
+    buildCommand: npm install && chmod +x node_modules/.bin/prisma && npx prisma generate && npm run build
+    startCommand: chmod +x node_modules/.bin/prisma && npx prisma migrate deploy && npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      # IMPORTANT: Add these environment variables in Render dashboard:
+      # - DATABASE_URL (PostgreSQL connection string from Render PostgreSQL service)
+      # - JWT_SECRET (Generate a strong secret: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+      # - CORS_ORIGIN (Your Netlify frontend URL, e.g., https://your-app.netlify.app)
+      # Optional:
+      # - REDIS_URL (Redis connection string, if using Redis)
+      # - REDIS_ENABLED (true/false, set to false to disable Redis)
+

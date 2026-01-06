@@ -1,0 +1,897 @@
+// Prisma Schema for Centralized Delivery Network
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  AGENT
+  PARTNER
+  ADMIN
+  LOGISTICS_PROVIDER
+}
+
+enum VehicleType {
+  BIKE
+  SCOOTER
+  CAR
+  BICYCLE
+  TRUCK
+  CARGO_CARRIER
+}
+
+enum AgentStatus {
+  OFFLINE
+  ONLINE
+  ON_TRIP
+}
+
+enum PayoutPlan {
+  WEEKLY
+  MONTHLY
+}
+
+enum PartnerCategory {
+  QUICK_COMMERCE
+  ECOMMERCE
+  LOCAL_STORE
+  FOOD_DELIVERY
+  LOGISTICS_PROVIDER
+}
+
+enum SLAPriority {
+  EXPRESS
+  STANDARD
+}
+
+enum OrderStatus {
+  SEARCHING_AGENT
+  ASSIGNED
+  PICKED_UP
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  DELAYED
+  // Logistics Provider statuses (multi-leg delivery)
+  IN_TRANSIT // Order is in transit within logistics provider's network
+  AT_WAREHOUSE // Order has arrived at logistics provider warehouse
+  READY_FOR_PICKUP // Order ready for agent pickup from warehouse
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum EventType {
+  AGENT_ONLINE
+  AGENT_OFFLINE
+  ORDER_CREATED
+  ORDER_ASSIGNED
+  ORDER_ACCEPTED
+  ORDER_REJECTED
+  ORDER_PICKED_UP
+  ORDER_OUT_FOR_DELIVERY
+  ORDER_DELIVERED
+  ORDER_CANCELLED
+  AGENT_LOCATION_UPDATE
+}
+
+enum ActorType {
+  AGENT
+  PARTNER
+  SYSTEM
+  ADMIN
+}
+
+// Main User table - all authentication
+model User {
+  id             String    @id
+  name           String
+  email          String    @unique
+  phone          String    @unique
+  passwordHash   String
+  role           UserRole
+  emailVerified  DateTime?
+  phoneVerified  Boolean   @default(false)
+  profilePicture String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relations
+  agent             Agent?
+  partner           Partner?
+  logisticsProvider LogisticsProvider?
+  notifications     NotificationToken[]
+  userNotifications Notification[]
+  tickets           SupportTicket[]
+
+  @@index([email])
+  @@index([phone])
+  @@index([role])
+}
+
+// Email verification for user registration
+model EmailVerification {
+  id        String   @id @default(cuid())
+  email     String
+  otp       String
+  expiresAt DateTime
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  verifiedAt DateTime?
+
+  // Store registration data temporarily until verification
+  registrationData Json? // Store name, phone, password, role, etc.
+
+  @@index([email])
+  @@index([otp])
+  @@index([expiresAt])
+}
+
+// Agent-specific data
+model Agent {
+  id              String      @id
+  userId          String      @unique
+  vehicleType     VehicleType
+  status          AgentStatus @default(OFFLINE)
+  payoutPlan      PayoutPlan  @default(WEEKLY) // Weekly or Monthly payout plan
+  rating          Float?      @default(0)
+  totalOrders     Int         @default(0)
+  completedOrders Int         @default(0)
+  cancelledOrders Int         @default(0)
+  acceptanceRate  Float       @default(0) // percentage
+  currentOrderId  String?     @unique
+  isApproved      Boolean     @default(false)
+  isBlocked       Boolean     @default(false)
+  blockedReason   String?
+  city            String?
+  state           String?
+  pincode         String?
+  lastOnlineAt    DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  // Relations
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders          Order[]
+  currentOrder    Order?          @relation("CurrentOrder", fields: [currentOrderId], references: [id])
+  documents       AgentDocument[]
+  locationHistory AgentLocation[]
+  tickets         SupportTicket[]
+  ratings         AgentRating[]
+  wallet          AgentWallet?
+  walletPayouts   WalletPayout[]
+  schedules       AgentSchedule[]
+
+  @@index([status])
+  @@index([isApproved])
+  @@index([city])
+  @@index([status, isApproved, isBlocked]) // Composite index for common query pattern
+  @@index([isApproved, createdAt]) // For KYC queries with sorting
+}
+
+// Agent documents (license, vehicle registration, etc.)
+model AgentDocument {
+  id           String   @id @default(cuid())
+  agentId      String
+  documentType String // LICENSE, VEHICLE_REG, ID_PROOF, etc.
+  fileName     String
+  fileUrl      String
+  verified     Boolean  @default(false)
+  uploadedAt   DateTime @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@index([verified]) // Frequently queried in KYC verification
+  @@index([documentType]) // Used in document type queries
+  @@index([agentId, documentType, verified]) // Composite for document verification queries
+}
+
+// Agent location history (optional - for analytics)
+model AgentLocation {
+  id        String   @id @default(cuid())
+  agentId   String
+  latitude  Float
+  longitude Float
+  timestamp DateTime @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, timestamp])
+  @@index([timestamp])
+}
+
+// Pricing Profile - Configurable pricing per partner category
+model PricingProfile {
+  id            String          @id @default(uuid())
+  name          String
+  category      PartnerCategory @unique // One profile per category
+  baseFee       Float
+  perKmFee      Float
+  surgePercent  Float           @default(0)
+  agentSharePct Float // e.g. 70 => agent 70% of partnerPayment
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  // Relations
+  partners Partner[]
+
+  @@index([category])
+}
+
+// Partner-specific data
+model Partner {
+  id               String          @id
+  userId           String          @unique
+  companyName      String
+  businessName     String? // Alias for companyName, kept for compatibility
+  category         PartnerCategory @default(LOCAL_STORE)
+  apiKey           String          @unique
+  webhookUrl       String?
+  isActive         Boolean         @default(true)
+  address          String?
+  city             String?
+  pincode          String?
+  contactPhone     String?
+  billingEmail     String?
+  pricingProfileId String? // FK for custom pricing (optional override)
+  // Category-specific fields (stored as JSON for flexibility)
+  categoryMetadata Json? // Quick Commerce: darkStoreId, operatingRadiusKm, expectedThroughputPerHour
+  // E-Commerce: pickupAvailabilitySlots, preferredReturnHandling
+  // Local Store: acceptsCOD, maxPackageWeightKg, preferredPickupMode
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  // Relations
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pricingProfile   PricingProfile?     @relation(fields: [pricingProfileId], references: [id], onDelete: SetNull)
+  orders           Order[]
+  tickets          SupportTicket[]
+  dailyStats       PartnerDailyStats[]
+  agentRatings     AgentRating[]
+  partnerRevenues  PartnerRevenue[]
+  platformRevenues PlatformRevenue[]
+  warehouses       Warehouse[] // Warehouses owned by this partner (for seller warehouses)
+  restaurants      Restaurant[] // Restaurants owned by this partner (for food delivery)
+
+  @@index([apiKey])
+  @@index([isActive])
+  @@index([category])
+  @@index([pricingProfileId])
+}
+
+// Logistics Provider-specific data
+model LogisticsProvider {
+  id               String   @id
+  userId           String   @unique
+  companyName      String
+  businessName     String? // Alias for companyName
+  apiKey           String   @unique
+  webhookUrl       String?
+  isActive         Boolean  @default(true)
+  address          String?
+  city             String?
+  state            String?
+  pincode          String?
+  contactPhone     String?
+  billingEmail     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  warehouses       Warehouse[]         @relation("LogisticsWarehouses")
+  logisticsAgents  LogisticsAgent[]
+  logisticsOrders Order[]             @relation("LogisticsOrders")
+  tickets          SupportTicket[]
+
+  @@index([apiKey])
+  @@index([isActive])
+  @@index([userId])
+}
+
+// Logistics Agent (vehicles/agents owned by logistics provider)
+model LogisticsAgent {
+  id                String      @id @default(cuid())
+  logisticsProviderId String
+  name              String // Agent/Driver name
+  phone             String
+  email             String?
+  vehicleType       VehicleType
+  vehicleNumber     String // Vehicle registration number
+  currentOrders     Int         @default(0) // Number of orders currently assigned
+  maxOrders         Int         @default(5) // Maximum orders this agent can handle
+  area              String? // Service area (city/state/pincode)
+  areaLatitude      Float? // Service area center latitude
+  areaLongitude     Float? // Service area center longitude
+  areaRadiusKm      Float? // Service radius in km
+  isActive          Boolean     @default(true)
+  isOnline          Boolean     @default(false)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  // Relations
+  logisticsProvider LogisticsProvider @relation(fields: [logisticsProviderId], references: [id], onDelete: Cascade)
+  assignedOrders    Order[]          @relation("LogisticsAgentOrders")
+
+  @@index([logisticsProviderId])
+  @@index([isActive])
+  @@index([isOnline])
+  @@index([vehicleType])
+  @@index([areaLatitude, areaLongitude])
+}
+
+// Orders
+model Order {
+  id                 String      @id
+  partnerId          String
+  agentId            String?
+  pickupLat          Float
+  pickupLng          Float
+  dropLat            Float
+  dropLng            Float
+  payoutAmount       Float // Amount paid to agent (base payment)
+  orderAmount        Float? // Total amount partner charges customer (for revenue calculation)
+  paymentType        String?     @default("PREPAID") // PREPAID or COD (Cash on Delivery)
+  platformFee        Float? // Platform commission/fee percentage or amount
+  orderType          String?     @default("ON_DEMAND") // ON_DEMAND, B2B_BULK
+  commissionRate     Float? // Commission percentage applied (15-30% for ON_DEMAND, 8-12% for B2B_BULK)
+  priority           String?     @default("NORMAL") // HIGH, NORMAL, LOW
+  status             OrderStatus @default(SEARCHING_AGENT)
+  assignedAt         DateTime?
+  pickedUpAt         DateTime?
+  deliveredAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  estimatedDuration  Int? // in minutes (calculated from Google Maps API)
+  actualDuration     Int? // in minutes
+  // Product and customer details
+  productType        String? // Product category (clothing, footwear, etc.)
+  customerName       String? // Customer name
+  customerPhone      String? // Customer phone number
+  customerEmail      String? // Customer email
+  customerAddress    String? // Full customer address
+  pdfUrl             String? // URL to generated order PDF
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  // Category-aware fields
+  partnerCategory PartnerCategory? // Denormalized from partner for faster queries
+  partnerPayment  Float? // Total amount partner pays (baseFee + distance * perKmFee + surge)
+  agentPayout     Float? // Amount paid to agent (calculated from partnerPayment)
+  adminCommission Float? // Platform commission (partnerPayment - agentPayout)
+  pickupWindow    DateTime? // Scheduled pickup time (for E-commerce)
+  slaPriority     SLAPriority? // EXPRESS (10-60 min) or STANDARD
+  distanceKm      Float? // Calculated distance for pricing
+
+  // Barcode/QR Code fields
+  barcode String? @unique // Barcode for scanning
+  qrCode  String? @unique // QR code for scanning
+
+  // Pickup verification fields (for food delivery)
+  pickupOtp         String?   @unique // 4-digit OTP for pickup verification (food delivery only)
+
+  // Delivery verification fields
+  deliveryOtp        String?   @unique // OTP for delivery verification
+  deliveryQrCode     String?   @unique // QR code for delivery verification
+  otpExpiresAt       DateTime? // OTP expiration time
+  verifiedAt         DateTime? // When delivery was verified by customer
+  verificationMethod String? // OTP, QR_CODE, SIGNATURE
+
+  // Structured address references (for warehouse/restaurant selection)
+  pickupWarehouseId String? // FK to Warehouse (if pickup is from a warehouse)
+  pickupRestaurantId String? // FK to Restaurant (if pickup is from a restaurant - food delivery)
+  dropWarehouseId   String? // FK to Warehouse (if drop is to a warehouse)
+  pickupAddressText String? // Free-text pickup address (backwards compatibility)
+  dropAddressText   String? // Free-text drop address (backwards compatibility)
+
+  // Logistics Provider fields
+  logisticsProviderId      String? // FK to LogisticsProvider (handling this order)
+  logisticsAgentId         String? // FK to LogisticsAgent (assigned logistics agent)
+  originWarehouseId        String? // FK to Warehouse (origin warehouse for logistics orders)
+  currentWarehouseId       String? // FK to Warehouse (current warehouse location)
+  transitTrackingNumber    String?   @unique // Tracking number for logistics provider's system
+  transitStatus            String? // Status within logistics provider's network (e.g., "In Transit", "At Hub", "Out for Delivery")
+  transitLegs              Json? // Array of transit legs: [{from, to, status, updatedAt}]
+  expectedWarehouseArrival DateTime? // Expected arrival time at warehouse
+  warehouseArrivedAt       DateTime? // Actual arrival time at warehouse
+  readyForPickupAt         DateTime? // When order was marked ready for agent pickup
+  scannedAtOriginWarehouse DateTime? // When order was scanned at origin warehouse
+  scannedAtDestinationWarehouse DateTime? // When order was scanned at destination warehouse
+
+  // Relations
+  partner            Partner             @relation(fields: [partnerId], references: [id])
+  agent              Agent?              @relation(fields: [agentId], references: [id])
+  currentAgent       Agent?              @relation("CurrentOrder")
+  tickets            SupportTicket[]
+  rating             AgentRating?
+  partnerRevenue     PartnerRevenue?
+  platformRevenue    PlatformRevenue?
+  walletTransactions WalletTransaction[]
+  pickupWarehouse    Warehouse?          @relation("PickupWarehouse", fields: [pickupWarehouseId], references: [id], onDelete: SetNull)
+  pickupRestaurant   Restaurant?         @relation("PickupRestaurant", fields: [pickupRestaurantId], references: [id], onDelete: SetNull)
+  dropWarehouse      Warehouse?          @relation("DropWarehouse", fields: [dropWarehouseId], references: [id], onDelete: SetNull)
+  logisticsProvider  LogisticsProvider?   @relation("LogisticsOrders", fields: [logisticsProviderId], references: [id], onDelete: SetNull)
+  logisticsAgent     LogisticsAgent?     @relation("LogisticsAgentOrders", fields: [logisticsAgentId], references: [id], onDelete: SetNull)
+  originWarehouse    Warehouse?          @relation("OriginWarehouse", fields: [originWarehouseId], references: [id], onDelete: SetNull)
+  currentWarehouse   Warehouse?          @relation("CurrentWarehouse", fields: [currentWarehouseId], references: [id], onDelete: SetNull)
+
+  @@index([partnerId])
+  @@index([pickupWarehouseId])
+  @@index([pickupRestaurantId])
+  @@index([dropWarehouseId])
+  @@index([logisticsProviderId])
+  @@index([originWarehouseId])
+  @@index([currentWarehouseId])
+  @@index([transitTrackingNumber])
+  @@index([agentId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([priority]) // Used in order prioritization
+  @@index([partnerId, status])
+  @@index([status, agentId]) // For agent order queries
+  @@index([status, createdAt]) // For sorting orders by status and date
+  @@index([logisticsProviderId, status]) // For logistics provider order queries
+  @@index([barcode]) // For barcode scanning
+  @@index([qrCode]) // For QR code scanning
+  @@index([pickupOtp]) // For pickup OTP verification
+  @@index([deliveryOtp]) // For OTP verification
+  @@index([deliveryQrCode]) // For QR verification
+  @@index([partnerCategory]) // For category-based filtering
+  @@index([slaPriority]) // For SLA-based prioritization
+  @@index([pickupWindow]) // For scheduled pickup queries
+}
+
+// Warehouse model for carriers and sellers
+model Warehouse {
+  id           String   @id @default(cuid())
+  partnerId    String? // Owner partner (for seller warehouses)
+  logisticsProviderId String? // Owner logistics provider (for logistics warehouses)
+  name         String // Warehouse name/identifier
+  address      String // Full address
+  city         String?
+  state        String?
+  pincode      String?
+  country      String?  @default("India")
+  latitude     Float // For geocoding and distance calculations
+  longitude    Float
+  contactName  String? // Contact person name
+  contactPhone String? // Contact phone
+  contactEmail String? // Contact email
+  isActive     Boolean  @default(true)
+  metadata     Json? // Additional metadata (operating hours, capacity, special handling, etc.)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  partner            Partner?           @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  logisticsProvider  LogisticsProvider? @relation("LogisticsWarehouses", fields: [logisticsProviderId], references: [id], onDelete: Cascade)
+  pickupOrders       Order[]            @relation("PickupWarehouse")
+  dropOrders         Order[]            @relation("DropWarehouse")
+  originOrders       Order[]            @relation("OriginWarehouse")
+  currentOrders      Order[]            @relation("CurrentWarehouse")
+
+  @@index([partnerId])
+  @@index([logisticsProviderId])
+  @@index([isActive])
+  @@index([latitude, longitude]) // For geospatial queries
+}
+
+// Restaurant model for food delivery partners
+model Restaurant {
+  id           String   @id @default(cuid())
+  partnerId    String // Owner partner (for food delivery restaurants)
+  name         String // Restaurant name/identifier
+  address      String // Full address
+  city         String?
+  state        String?
+  pincode      String?
+  country      String?  @default("India")
+  latitude     Float // For geocoding and distance calculations
+  longitude    Float
+  contactName  String? // Contact person name
+  contactPhone String? // Contact phone
+  contactEmail String? // Contact email
+  isActive     Boolean  @default(true)
+  metadata     Json? // Additional metadata (operating hours, cuisine type, etc.)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  partner       Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  pickupOrders  Order[] @relation("PickupRestaurant")
+
+  @@index([partnerId])
+  @@index([isActive])
+  @@index([latitude, longitude]) // For geospatial queries
+}
+
+// FCM notification tokens
+model NotificationToken {
+  id         String   @id @default(cuid())
+  userId     String
+  fcmToken   String   @unique
+  deviceType String? // IOS, ANDROID, WEB
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([fcmToken])
+}
+
+// Support tickets
+model SupportTicket {
+  id          String       @id @default(cuid())
+  orderId     String?
+  agentId     String?
+  partnerId   String?
+  logisticsProviderId String?
+  userId      String
+  issueType   String // DELAY, MISSING, DAMAGE, OTHER
+  description String
+  status      TicketStatus @default(OPEN)
+  resolvedAt  DateTime?
+  adminNotes  String? // Admin comments/notes when resolving or closing
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Relations
+  order             Order?             @relation(fields: [orderId], references: [id])
+  agent             Agent?            @relation(fields: [agentId], references: [id])
+  partner           Partner?           @relation(fields: [partnerId], references: [id])
+  logisticsProvider LogisticsProvider? @relation(fields: [logisticsProviderId], references: [id])
+  user              User               @relation(fields: [userId], references: [id])
+
+  @@index([orderId])
+  @@index([agentId])
+  @@index([partnerId])
+  @@index([logisticsProviderId])
+  @@index([status])
+}
+
+// Analytics events
+model AppEvent {
+  id         String    @id @default(cuid())
+  userId     String?
+  actorType  ActorType
+  eventType  EventType
+  entityType String? // ORDER, AGENT, PARTNER
+  entityId   String?
+  metadata   Json? // Additional event data
+  createdAt  DateTime  @default(now())
+
+  @@index([eventType])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@index([actorType])
+}
+
+// Daily aggregated stats (optional - for performance)
+model DailyStats {
+  id                String   @id @default(cuid())
+  date              DateTime @unique @db.Date
+  totalOrders       Int      @default(0)
+  completedOrders   Int      @default(0)
+  cancelledOrders   Int      @default(0)
+  activeAgents      Int      @default(0)
+  avgAssignmentTime Float? // in seconds
+  totalPayout       Float    @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([date])
+}
+
+// Partner-specific daily stats
+model PartnerDailyStats {
+  id                String   @id @default(cuid())
+  partnerId         String
+  date              DateTime @db.Date
+  totalOrders       Int      @default(0)
+  completedOrders   Int      @default(0)
+  cancelledOrders   Int      @default(0)
+  avgAssignmentTime Float?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@unique([partnerId, date])
+  @@index([partnerId, date])
+}
+
+// Partner Revenue Model - Track partner earnings from orders
+model PartnerRevenue {
+  id          String    @id @default(cuid())
+  partnerId   String
+  orderId     String    @unique
+  orderAmount Float // Amount partner charges customer
+  deliveryFee Float // Amount paid to agent
+  platformFee Float // Platform commission/fee
+  netRevenue  Float // orderAmount - deliveryFee - platformFee
+  status      String    @default("PENDING") // PENDING, PROCESSED, FAILED
+  processedAt DateTime?
+  periodStart DateTime  @db.Date // For aggregation (daily/weekly/monthly)
+  periodEnd   DateTime  @db.Date
+  periodType  String // DAILY, WEEKLY, MONTHLY
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([partnerId])
+  @@index([orderId])
+  @@index([status])
+  @@index([periodStart, periodEnd])
+  @@index([createdAt])
+}
+
+// Platform Revenue Model - Track platform earnings (commissions, fees)
+model PlatformRevenue {
+  id          String    @id @default(cuid())
+  orderId     String    @unique
+  partnerId   String
+  agentId     String?
+  orderAmount Float // Total order value
+  platformFee Float // Platform commission/fee from partner
+  agentPayout Float // Amount paid to agent
+  netRevenue  Float // platformFee (platform keeps this)
+  revenueType String // COMMISSION, SERVICE_FEE, SUBSCRIPTION
+  status      String    @default("PENDING") // PENDING, PROCESSED, FAILED
+  processedAt DateTime?
+  periodStart DateTime  @db.Date // For aggregation
+  periodEnd   DateTime  @db.Date
+  periodType  String // DAILY, WEEKLY, MONTHLY
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([partnerId])
+  @@index([agentId])
+  @@index([status])
+  @@index([periodStart, periodEnd])
+  @@index([revenueType])
+  @@index([createdAt])
+}
+
+// Admin Wallet - Platform's main wallet (stores all platform revenue)
+model AdminWallet {
+  id             String   @id @default(cuid())
+  balance        Float    @default(0) // Current balance
+  totalDeposited Float    @default(0) // Total money received
+  totalPaidOut   Float    @default(0) // Total money paid to agents
+  lastUpdated    DateTime @default(now()) @updatedAt
+  createdAt      DateTime @default(now())
+
+  transactions WalletTransaction[]
+
+  @@index([lastUpdated])
+}
+
+// Agent Wallet - Stores agent earnings (pending payout)
+model AgentWallet {
+  id             String    @id @default(cuid())
+  agentId        String    @unique
+  balance        Float     @default(0) // Current pending balance
+  totalEarned    Float     @default(0) // Total earnings (all time)
+  totalPaidOut   Float     @default(0) // Total paid out
+  lastPayoutDate DateTime? // Last payout date
+  nextPayoutDate DateTime? // Next scheduled payout date
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  agent        Agent               @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+  payouts      WalletPayout[]
+
+  @@index([agentId])
+  @@index([nextPayoutDate])
+  @@index([lastPayoutDate])
+}
+
+// Wallet Transactions - Track all wallet movements
+model WalletTransaction {
+  id            String   @id @default(cuid())
+  walletType    String // ADMIN_WALLET, AGENT_WALLET
+  adminWalletId String?
+  agentWalletId String?
+  orderId       String? // Related order if applicable
+  amount        Float // Transaction amount (positive = credit, negative = debit)
+  type          String // DEPOSIT, WITHDRAWAL, PAYOUT, COMMISSION, EARNING
+  description   String? // Transaction description
+  balanceBefore Float // Balance before transaction
+  balanceAfter  Float // Balance after transaction
+  status        String   @default("COMPLETED") // COMPLETED, PENDING, FAILED
+  createdAt     DateTime @default(now())
+
+  adminWallet AdminWallet? @relation(fields: [adminWalletId], references: [id], onDelete: Cascade)
+  agentWallet AgentWallet? @relation(fields: [agentWalletId], references: [id], onDelete: Cascade)
+  order       Order?       @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([walletType])
+  @@index([adminWalletId])
+  @@index([agentWalletId])
+  @@index([orderId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Wallet Payouts - Track agent payouts (weekly payouts)
+model WalletPayout {
+  id            String    @id @default(cuid())
+  agentWalletId String
+  agentId       String
+  amount        Float // Payout amount
+  periodStart   DateTime  @db.Date // Week start date
+  periodEnd     DateTime  @db.Date // Week end date
+  status        String    @default("PENDING") // PENDING, PROCESSED, FAILED, CANCELLED
+  paymentMethod String? // BANK_TRANSFER, UPI, MOBILE_MONEY
+  transactionId String? // External transaction ID
+  bankAccount   String? // Agent's bank account details (JSON)
+  upiId         String? // Agent's UPI ID
+  processedAt   DateTime?
+  failedAt      DateTime?
+  failureReason String?
+  notes         String?
+  idempotencyKey String?  @unique // Unique key for deduplication and idempotent retries
+  retryCount    Int       @default(0) // Number of retry attempts
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  agentWallet AgentWallet      @relation(fields: [agentWalletId], references: [id], onDelete: Cascade)
+  agent       Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  auditLogs   PayoutAuditLog[]
+
+  @@unique([agentId, periodStart, periodEnd])
+  @@index([agentId])
+  @@index([agentWalletId])
+  @@index([status])
+  @@index([periodStart, periodEnd])
+  @@index([idempotencyKey])
+  @@index([createdAt])
+}
+
+// In-app notifications
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  type      String // ORDER, SYSTEM, SUPPORT, etc.
+  isRead    Boolean   @default(false)
+  link      String? // Optional link to related page
+  metadata  Json? // Additional data
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@index([type])
+}
+
+// Agent ratings and reviews
+model AgentRating {
+  id        String   @id @default(cuid())
+  orderId   String   @unique
+  agentId   String
+  partnerId String
+  rating    Int // 1-5 stars
+  comment   String? // Optional review comment
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  agent   Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@index([partnerId])
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+// Agent schedule and availability
+model AgentSchedule {
+  id          String   @id @default(cuid())
+  agentId     String
+  date        DateTime @db.Date
+  startTime   String? // HH:mm format
+  endTime     String? // HH:mm format
+  isAvailable Boolean  @default(true)
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, date])
+  @@index([agentId])
+  @@index([date])
+  @@index([agentId, date, isAvailable])
+}
+
+// Payout audit log - Track all payout state changes
+model PayoutAuditLog {
+  id            String   @id @default(cuid())
+  payoutId      String
+  action        String // CREATED, UPDATED, PROCESSED, FAILED, RETRIED, CANCELLED
+  performedBy   String? // Admin user ID who performed the action
+  previousState Json? // Previous payout state snapshot
+  newState      Json? // New payout state snapshot
+  metadata      Json? // Additional context (gateway response, error details, etc.)
+  createdAt     DateTime @default(now())
+
+  payout WalletPayout @relation(fields: [payoutId], references: [id], onDelete: Cascade)
+
+  @@index([payoutId])
+  @@index([createdAt])
+  @@index([action])
+  @@index([performedBy])
+}
+
+// Pay structure configuration
+model PayStructure {
+  id             String    @id @default(cuid())
+  name           String // Structure name (e.g., "Standard", "Premium")
+  payType        String // PER_DELIVERY, HOURLY, SALARY, COMMISSION
+  baseRate       Float? // Base rate (per delivery or per hour)
+  commissionRate Float? // Commission percentage (0-100)
+  minGuarantee   Float? // Minimum guaranteed pay
+  maxLimit       Float? // Maximum pay limit
+  bonusRules     Json? // Bonus calculation rules
+  deductionRules Json? // Deduction rules
+  isActive       Boolean   @default(true)
+  effectiveFrom  DateTime  @default(now())
+  effectiveTo    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([isActive])
+  @@index([effectiveFrom, effectiveTo])
+}
+
+// System Settings - Single row table for global configuration
+model SystemSettings {
+  // Single row with fixed ID
+  id                 String   @id @default("system")
+  systemName         String   @default("DeliveryHub")
+  maintenanceMode    Boolean  @default(false)
+  registrationEnabled Boolean @default(true)
+  agentAutoApproval  Boolean  @default(false)
+  emailEnabled       Boolean  @default(true)
+  smsEnabled          Boolean  @default(false)
+  pushEnabled         Boolean  @default(true)
+  // meters
+  maxRadius           Int      @default(5000)
+  maxAgentsToOffer    Int      @default(5)
+  // seconds
+  offerTimeout        Int      @default(30)
+  // 10%
+  platformFee         Float    @default(0.1)
+  minPayout           Float    @default(10.0)
+  updatedAt           DateTime @updatedAt
+  // User ID who last updated
+  updatedBy           String?
+
+  @@map("SystemSettings")
+}
