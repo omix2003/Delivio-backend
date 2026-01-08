@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authenticate } from '../middleware/auth.middleware';
 import { requireAdmin } from '../middleware/role.middleware';
 import { adminController } from '../controllers/admin.controller';
+import { billingController } from '../controllers/billing.controller';
 import { revenueController } from '../controllers/revenue.controller';
 import { walletController } from '../controllers/wallet.controller';
 
@@ -37,6 +38,11 @@ router.get('/partners', adminController.getPartners);
 router.get('/partners/:id', adminController.getPartnerDetails);
 router.put('/partners/:id', adminController.updatePartner);
 router.delete('/partners/:id', adminController.deletePartner);
+
+// ==================== BILLING ====================
+router.post('/billing/invoices/generate', billingController.generatePartnerInvoice);
+router.post('/billing/invoices/generate-all', billingController.generateAllInvoices);
+router.post('/billing/provider-settlements/generate', billingController.generateProviderSettlement);
 
 // ==================== ORDER MANAGEMENT ====================
 router.get('/orders', adminController.getOrders);

@@ -6,6 +6,7 @@ import { partnerController } from '../controllers/partner.controller';
 import { partnerPayoutController } from '../controllers/partner-payout.controller';
 import { warehouseController } from '../controllers/warehouse.controller';
 import { restaurantController } from '../controllers/restaurant.controller';
+import { billingController } from '../controllers/billing.controller';
 import { updateWebhookSchema, createOrderSchema, updateOrderSchema, bulkOrderSchema, deleteBulkOrdersSchema, createWarehouseSchema, updateWarehouseSchema, createRestaurantSchema, updateRestaurantSchema } from '../utils/validation.schemas';
 
 const router = Router();
@@ -44,6 +45,18 @@ router.post('/support/tickets', partnerController.createSupportTicket);
 // Payout routes (partners track payouts, not revenue)
 router.get('/payouts/summary', partnerPayoutController.getPayoutSummary);
 router.get('/payouts', partnerPayoutController.getPayouts);
+
+// Billing routes
+router.get('/billing/config', billingController.getBillingConfig);
+router.put('/billing/config', billingController.updateBillingConfig);
+router.get('/invoices', billingController.getPartnerInvoices);
+router.get('/invoices/:id', billingController.getPartnerInvoice);
+router.post('/invoices/:id/acknowledge', billingController.acknowledgeInvoice);
+router.post('/invoices/:id/dispute', billingController.disputeInvoice);
+
+// Wallet routes (for LOCAL_STORE partners)
+router.get('/wallet/balance', billingController.getWalletBalance);
+router.post('/wallet/topup', billingController.topUpWallet);
 
 // Warehouse management routes (available to all partners except FOOD_DELIVERY)
 router.post('/warehouses', validate(createWarehouseSchema), warehouseController.createWarehouse);

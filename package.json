@@ -18,9 +18,12 @@
     "prisma:seed": "ts-node prisma/seed.ts",
     "test:assignment": "ts-node src/scripts/test-assignment.ts",
     "test:location-updates": "ts-node src/scripts/test-location-updates.ts",
+    "test:billing": "ts-node src/scripts/test-billing.ts",
+    "test:billing:comprehensive": "ts-node src/scripts/test-billing-comprehensive.ts",
     "sync:wallet-revenue": "ts-node src/scripts/sync-wallet-revenue.ts",
     "fix:logistics-orders": "ts-node src/scripts/fix-logistics-orders.ts",
-    "fix:drop-warehouse-id": "ts-node src/scripts/fix-drop-warehouse-id.ts"
+    "fix:drop-warehouse-id": "ts-node src/scripts/fix-drop-warehouse-id.ts",
+    "send:payout-reminders": "ts-node src/scripts/send-payout-reminders.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

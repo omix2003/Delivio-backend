@@ -133,7 +133,7 @@ export const warehouseService = {
         { partner: { category: PartnerCategory.LOGISTICS_PROVIDER } },
         { logisticsProviderId: { not: null } },
       ];
-    } else if (partnerId) {
+      } else if (partnerId) {
       if (partnerCategory === 'LOGISTICS_PROVIDER') {
         // Logistics providers can have warehouses in both Partner and LogisticsProvider models
         // Only show their own warehouses
@@ -145,8 +145,12 @@ export const warehouseService = {
         // Food delivery partners should not see warehouses (they use restaurants)
         // Return empty array
         return [];
+      } else if (partnerCategory === 'LOCAL_STORE') {
+        // LOCAL_STORE partners should not see warehouses (they have a single shop address)
+        // Return empty array
+        return [];
       } else {
-        // For seller partners (QUICK_COMMERCE, ECOMMERCE, LOCAL_STORE), only show their own warehouses
+        // For seller partners (QUICK_COMMERCE, ECOMMERCE), only show their own warehouses
         where.partnerId = partnerId;
       }
     }

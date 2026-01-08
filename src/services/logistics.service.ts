@@ -189,6 +189,27 @@ export const logisticsService = {
 
 
   /**
+   * Calculate distance between two points (Haversine formula)
+   */
+  calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    const R = 6371; // Earth's radius in km
+    const dLat = this.toRad(lat2 - lat1);
+    const dLon = this.toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(this.toRad(lat1)) *
+        Math.cos(this.toRad(lat2)) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  },
+
+  toRad(degrees: number): number {
+    return degrees * (Math.PI / 180);
+  },
+
+  /**
    * Extract destination warehouse from transit legs
    */
   extractDestinationWarehouse(transitLegs: any): string | null {
@@ -488,6 +509,21 @@ export const logisticsService = {
       },
     });
 
+    // RTO Handling: If this is an RTO order arriving at origin warehouse, create reverse Leg 1
+    const transitLegsData = updatedOrder.transitLegs as any;
+    const isRTOOrder = transitLegsData?.leg === 'RTO_REVERSE_LEG2' || transitLegsData?.rtoParentOrderId;
+    
+    if (isRTOOrder && warehouseId === order.originWarehouseId) {
+      try {
+        const { logisticsOrderService } = await import('./logistics-order.service');
+        await logisticsOrderService.createRTOReverseLeg1(orderId, warehouseId);
+        console.log(`[Logistics Service] Created reverse Leg 1 for RTO order ${orderId} at origin warehouse`);
+      } catch (error: any) {
+        console.error(`[Logistics Service] Failed to create reverse Leg 1 for RTO:`, error);
+        // Don't fail the warehouse arrival update if reverse Leg 1 creation fails
+      }
+    }
+
     return updatedOrder;
   },
 
@@ -625,6 +661,28 @@ export const logisticsService = {
       }
     }
 
+    // Calculate provider charge for Leg 2 (warehouse → warehouse)
+    // This should ideally come from provider contract/rate card
+    // For now, using distance-based calculation
+    let providerCharge = 0;
+    if (order.originWarehouseId) {
+      const originWarehouse = await prisma.warehouse.findUnique({
+        where: { id: order.originWarehouseId },
+        select: { latitude: true, longitude: true },
+      });
+      
+      if (originWarehouse) {
+        const distanceKm = this.calculateDistance(
+          originWarehouse.latitude,
+          originWarehouse.longitude,
+          warehouse.latitude,
+          warehouse.longitude
+        );
+        // Default rate: ₹2 per km (should be configurable per provider)
+        providerCharge = distanceKm * 2;
+      }
+    }
+
     // Create delivery order for Leg 3 if needed
     let deliveryOrderId: string | null = null;
     try {
@@ -659,6 +717,7 @@ export const logisticsService = {
         agentPayout: pricing.agentPayout,
         adminCommission: pricing.adminCommission,
         distanceKm: pricing.distanceKm,
+        providerCharge: Math.round(providerCharge * 100) / 100, // Store provider charge for Leg 2
         transitStatus: 'Ready for Pickup',
         logisticsAgentId: null, // Clear logistics agent - Leg 2 complete
         agentId: null, // Ensure no regular agent assigned yet
@@ -694,6 +753,11 @@ export const logisticsService = {
 
     // ✅ FIXED: Process immediately instead of setTimeout
     // This ensures order state is consistent and errors are properly handled
+    // 
+    // EDGE CASE 2: Provider marks READY_FOR_PICKUP but agent unavailable
+    // - Order transitions to SEARCHING_AGENT (never reverts to provider)
+    // - Assignment service retries like normal last-mile delivery
+    // - Do NOT revert to provider even if assignment fails
     try {
       // Immediately transition to SEARCHING_AGENT
       await prisma.order.update({
@@ -717,15 +781,19 @@ export const logisticsService = {
       }).catch((error) => {
         // Log error but don't fail the entire operation
         // The order is already in SEARCHING_AGENT status, so assignment can be retried
+        // IMPORTANT: Do NOT revert to provider - retry like normal last-mile
         logger.error('Assignment failed for order', error, { orderId });
         return { success: false, error };
       });
 
       if (!assignmentResult || (assignmentResult as any).success === false) {
-        logger.warn('Order assignment did not succeed', {
+        logger.warn('Order assignment did not succeed - will retry like normal last-mile', {
           orderId,
           result: assignmentResult,
+          note: 'Order remains in SEARCHING_AGENT - will be retried by assignment service',
         });
+        // Order stays in SEARCHING_AGENT - assignment service will retry automatically
+        // Do NOT revert to provider or READY_FOR_PICKUP
       }
     } catch (error) {
       // If status update fails, log and rethrow - this is a critical error

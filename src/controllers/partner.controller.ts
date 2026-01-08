@@ -236,6 +236,22 @@ export const partnerController = {
       }
 
       // Calculate pricing using pricing service (category-aware)
+      // Check wallet balance for LOCAL_STORE partners (wallet-based billing)
+      try {
+        const { partnerWalletService } = await import('../services/partner-wallet.service');
+        const walletCheck = await partnerWalletService.canCreateOrder(partnerId, orderAmount || 0);
+        if (!walletCheck.allowed) {
+          return res.status(400).json({
+            error: walletCheck.reason || 'Insufficient wallet balance',
+            walletBalance: walletCheck.currentBalance,
+            requiredBalance: walletCheck.requiredBalance,
+          });
+        }
+      } catch (walletError: any) {
+        // If wallet service fails, log but don't block order creation (might not be wallet-based)
+        console.warn('[Partner Controller] Wallet check failed:', walletError?.message);
+      }
+
       let pricing;
       let pricingProfile;
       try {
@@ -267,8 +283,33 @@ export const partnerController = {
         ? 'HIGH' 
         : priority;
 
+      // LOCAL_STORE partners cannot use multi-leg logistics flow
+      // They have a single shop location (stored in partner.address, city, pincode)
+      if (partner.category === PartnerCategory.LOCAL_STORE) {
+        if (originWarehouseId || currentWarehouseId || logisticsProviderId || transitLegs) {
+          return res.status(400).json({
+            error: 'Multi-leg logistics flow is not available for LOCAL_STORE partners',
+            message: 'Local stores use direct delivery from shop to customer. Please use shop address as pickup location.',
+          });
+        }
+        
+        // For LOCAL_STORE, pickup should be from partner's shop address
+        // If pickup coordinates are not provided, use partner's address if available
+        if (!finalPickupLat || !finalPickupLng) {
+          if (partner.address && partner.city) {
+            // In a real implementation, you'd geocode the address here
+            // For now, we'll require coordinates to be provided
+            return res.status(400).json({
+              error: 'Pickup coordinates are required',
+              message: 'Please provide pickup coordinates. For local stores, this should be your shop location.',
+            });
+          }
+        }
+      }
+
       // Validate multi-leg logistics flow: ensure origin and destination warehouses are different
-      if (transitLegs && Array.isArray(transitLegs) && originWarehouseId) {
+      // (Only for non-LOCAL_STORE partners)
+      if (partner.category !== PartnerCategory.LOCAL_STORE && transitLegs && Array.isArray(transitLegs) && originWarehouseId) {
         // Extract destination warehouse from transit legs
         const leg2 = transitLegs.find((leg: any) => leg.leg === 2);
         const leg3 = transitLegs.find((leg: any) => leg.leg === 3);
@@ -339,7 +380,7 @@ export const partnerController = {
             customerEmail: customerEmail || undefined,
             customerAddress: customerAddress || undefined,
             productType: productType || undefined,
-            orderAmount: orderAmount || finalPartnerPayment || undefined,
+            orderAmount: finalPartnerPayment, // Always set orderAmount (validated above)
             paymentType: paymentType || 'PREPAID',
             transitLegs: transitLegs ? (Array.isArray(transitLegs) ? transitLegs : undefined) : undefined, // For multi-leg logistics flow
             status: 'SEARCHING_AGENT',
@@ -1165,6 +1206,14 @@ export const partnerController = {
       const finalPartnerPayment = orderAmount || pricing.partnerPayment;
       const finalPayoutAmount = payoutAmount || pricing.agentPayout;
       const finalAdminCommission = pricing.adminCommission;
+
+      // Validate that orderAmount is set (required for revenue calculations)
+      if (!finalPartnerPayment || finalPartnerPayment <= 0) {
+        return res.status(400).json({
+          error: 'Invalid order amount',
+          message: 'orderAmount is required and must be greater than 0. Either provide orderAmount or ensure pricing calculation succeeds.',
+        });
+      }
 
       // Get SLA priority based on partner category
       const slaPriority = pricingService.getSLAPriority(partnerDetails.category);
@@ -2118,6 +2167,12 @@ export const partnerController = {
         const finalAdminCommission = pricing.adminCommission;
         const slaPriority = pricingService.getSLAPriority(partner.category);
 
+        // Validate that orderAmount is set (required for revenue calculations)
+        if (!finalPartnerPayment || finalPartnerPayment <= 0) {
+          console.error(`[Bulk Orders] Invalid order amount for order, skipping:`, { orderAmount, calculatedAmount: pricing.partnerPayment });
+          continue; // Skip this order
+        }
+
         const orderId = await generateId('ORD');
 
         try {
@@ -2268,6 +2323,10 @@ export const partnerController = {
             partnerId: true,
             agentId: true,
             logisticsAgentId: true,
+            logisticsProviderId: true,
+            currentWarehouseId: true,
+            originWarehouseId: true,
+            transitLegs: true,
           },
         });
 
@@ -2282,6 +2341,34 @@ export const partnerController = {
 
         if (currentOrder.status === 'CANCELLED') {
           throw new Error('Order is already cancelled');
+        }
+
+        // EDGE CASE 3: Customer cancels after Leg 2 (order at destination warehouse)
+        // Convert to RTO flow - reverse logistics via provider
+        const transitLegs = currentOrder.transitLegs as any;
+        const leg2 = Array.isArray(transitLegs) ? transitLegs.find((leg: any) => leg.leg === 2) : null;
+        const isAfterLeg2 = leg2 && leg2.status === 'COMPLETED' && 
+                           (currentOrder.status === 'AT_WAREHOUSE' || 
+                            currentOrder.status === 'READY_FOR_PICKUP' || 
+                            currentOrder.status === 'SEARCHING_AGENT' ||
+                            currentOrder.status === 'ASSIGNED' ||
+                            currentOrder.status === 'PICKED_UP' ||
+                            currentOrder.status === 'OUT_FOR_DELIVERY');
+
+        if (isAfterLeg2 && currentOrder.currentWarehouseId && currentOrder.logisticsProviderId) {
+          // Create RTO order - reverse logistics via provider
+          try {
+            const { logisticsOrderService } = await import('../services/logistics-order.service');
+            await logisticsOrderService.createRTOOrder(
+              orderId,
+              reason || 'Cancelled by customer after Leg 2',
+              currentOrder.currentWarehouseId
+            );
+            console.log(`[Partner Controller] Created RTO order for cancelled order ${orderId} after Leg 2`);
+          } catch (error: any) {
+            console.error(`[Partner Controller] Failed to create RTO order:`, error);
+            // Continue with cancellation even if RTO creation fails
+          }
         }
 
         // If order is assigned to a regular agent, free the agent

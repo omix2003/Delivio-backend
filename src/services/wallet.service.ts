@@ -104,15 +104,36 @@ export const walletService = {
    */
   async creditAgentWallet(agentId: string, amount: number, orderId: string, description?: string, tx?: Prisma.TransactionClient) {
     const client = tx || prisma;
+    
+    // Check if transaction already exists for this order (idempotency)
+    const existingTransaction = await client.walletTransaction.findFirst({
+      where: {
+        orderId,
+        walletType: 'AGENT_WALLET',
+        type: 'EARNING',
+        status: 'COMPLETED',
+      },
+    });
+
+    if (existingTransaction) {
+      // Already credited, return existing wallet
+      return await walletService.getAgentWallet(agentId, client);
+    }
+
     const wallet = await walletService.getAgentWallet(agentId, client);
     const balanceBefore = wallet.balance;
     const balanceAfter = balanceBefore + amount;
+
+    // Validate amount is positive
+    if (amount <= 0) {
+      throw new Error(`Invalid credit amount: ${amount}. Amount must be greater than 0.`);
+    }
 
     // Update wallet
     const updatedWallet = await client.agentWallet.update({
       where: { agentId },
       data: {
-        balance: balanceAfter,
+        balance: Math.max(0, balanceAfter), // Ensure balance never goes negative
         totalEarned: wallet.totalEarned + amount,
       },
     });
@@ -140,15 +161,36 @@ export const walletService = {
    */
   async creditAdminWallet(amount: number, orderId: string, description?: string, tx?: Prisma.TransactionClient) {
     const client = tx || prisma;
+    
+    // Check if transaction already exists for this order (idempotency)
+    const existingTransaction = await client.walletTransaction.findFirst({
+      where: {
+        orderId,
+        walletType: 'ADMIN_WALLET',
+        type: 'COMMISSION',
+        status: 'COMPLETED',
+      },
+    });
+
+    if (existingTransaction) {
+      // Already credited, return existing wallet
+      return await walletService.getAdminWallet(client);
+    }
+
     const wallet = await walletService.getAdminWallet(client);
     const balanceBefore = wallet.balance;
     const balanceAfter = balanceBefore + amount;
+
+    // Validate amount is positive
+    if (amount <= 0) {
+      throw new Error(`Invalid credit amount: ${amount}. Amount must be greater than 0.`);
+    }
 
     // Update wallet
     const updatedWallet = await client.adminWallet.update({
       where: { id: wallet.id },
       data: {
-        balance: balanceAfter,
+        balance: Math.max(0, balanceAfter), // Ensure balance never goes negative
         totalDeposited: wallet.totalDeposited + amount,
       },
     });
@@ -178,15 +220,25 @@ export const walletService = {
     const client = tx || prisma;
     const wallet = await walletService.getAdminWallet(client);
 
+    // Validate amount is positive
+    if (amount <= 0) {
+      throw new Error(`Invalid debit amount: ${amount}. Amount must be greater than 0.`);
+    }
+
     if (wallet.balance < amount) {
-      throw new Error('Insufficient balance in admin wallet');
+      throw new Error(`Insufficient balance in admin wallet. Current: ${wallet.balance}, Required: ${amount}`);
     }
 
     const balanceBefore = wallet.balance;
     const balanceAfter = balanceBefore - amount;
 
-    // Update wallet
-    const updatedWallet = await prisma.adminWallet.update({
+    // Ensure balance doesn't go negative (safety check)
+    if (balanceAfter < 0) {
+      throw new Error(`Debit would result in negative balance. Current: ${balanceBefore}, Debit: ${amount}`);
+    }
+
+    // Update wallet - use transaction client if provided
+    const updatedWallet = await client.adminWallet.update({
       where: { id: wallet.id },
       data: {
         balance: balanceAfter,
@@ -218,18 +270,28 @@ export const walletService = {
     const client = tx || prisma;
     const wallet = await walletService.getAgentWallet(agentId, client);
 
+    // Validate amount is positive
+    if (amount <= 0) {
+      throw new Error(`Invalid debit amount: ${amount}. Amount must be greater than 0.`);
+    }
+
     if (wallet.balance < amount) {
-      throw new Error('Insufficient balance in agent wallet');
+      throw new Error(`Insufficient balance in agent wallet. Current: ${wallet.balance}, Required: ${amount}`);
     }
 
     const balanceBefore = wallet.balance;
     const balanceAfter = balanceBefore - amount;
 
+    // Ensure balance doesn't go negative (safety check)
+    if (balanceAfter < 0) {
+      throw new Error(`Debit would result in negative balance. Current: ${balanceBefore}, Debit: ${amount}`);
+    }
+
     // Calculate next Monday for next payout
     const nextMonday = getNextMonday();
 
-    // Update wallet
-    const updatedWallet = await prisma.agentWallet.update({
+    // Update wallet - use transaction client if provided
+    const updatedWallet = await client.agentWallet.update({
       where: { agentId },
       data: {
         balance: balanceAfter,
@@ -279,6 +341,152 @@ export const walletService = {
       totalPaidOut: wallet.totalPaidOut,
       totalDeposited: wallet.totalDeposited,
     };
+  },
+
+  /**
+   * Reverse agent wallet credit (for cancelled delivered orders)
+   */
+  async reverseAgentWalletCredit(agentId: string, orderId: string, description?: string, tx?: Prisma.TransactionClient) {
+    const client = tx || prisma;
+    
+    // Find the original earning transaction
+    const originalTransaction = await client.walletTransaction.findFirst({
+      where: {
+        orderId,
+        walletType: 'AGENT_WALLET',
+        type: 'EARNING',
+        status: 'COMPLETED',
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!originalTransaction) {
+      // No transaction to reverse
+      return null;
+    }
+
+    // Check if already reversed
+    const existingReversal = await client.walletTransaction.findFirst({
+      where: {
+        orderId,
+        walletType: 'AGENT_WALLET',
+        type: 'REVERSAL',
+        status: 'COMPLETED',
+      },
+    });
+
+    if (existingReversal) {
+      // Already reversed
+      return await walletService.getAgentWallet(agentId, client);
+    }
+
+    const wallet = await walletService.getAgentWallet(agentId, client);
+    const reversalAmount = originalTransaction.amount;
+    const balanceBefore = wallet.balance;
+    const balanceAfter = balanceBefore - reversalAmount;
+
+    if (balanceAfter < 0) {
+      throw new Error(`Cannot reverse: would result in negative balance. Current: ${balanceBefore}, Reversal: ${reversalAmount}`);
+    }
+
+    // Update wallet
+    const updatedWallet = await client.agentWallet.update({
+      where: { agentId },
+      data: {
+        balance: balanceAfter,
+        totalEarned: Math.max(0, wallet.totalEarned - reversalAmount),
+      },
+    });
+
+    // Create reversal transaction record
+    await client.walletTransaction.create({
+      data: {
+        walletType: 'AGENT_WALLET',
+        agentWalletId: wallet.id,
+        orderId,
+        amount: -reversalAmount, // Negative for reversal
+        type: 'REVERSAL',
+        description: description || `Reversal for cancelled order ${orderId.substring(0, 8).toUpperCase()}`,
+        balanceBefore,
+        balanceAfter,
+        status: 'COMPLETED',
+      },
+    });
+
+    return updatedWallet;
+  },
+
+  /**
+   * Reverse admin wallet credit (for cancelled delivered orders)
+   */
+  async reverseAdminWalletCredit(orderId: string, description?: string, tx?: Prisma.TransactionClient) {
+    const client = tx || prisma;
+    
+    // Find the original commission transaction
+    const originalTransaction = await client.walletTransaction.findFirst({
+      where: {
+        orderId,
+        walletType: 'ADMIN_WALLET',
+        type: 'COMMISSION',
+        status: 'COMPLETED',
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!originalTransaction) {
+      // No transaction to reverse
+      return null;
+    }
+
+    // Check if already reversed
+    const existingReversal = await client.walletTransaction.findFirst({
+      where: {
+        orderId,
+        walletType: 'ADMIN_WALLET',
+        type: 'REVERSAL',
+        status: 'COMPLETED',
+      },
+    });
+
+    if (existingReversal) {
+      // Already reversed
+      return await walletService.getAdminWallet(client);
+    }
+
+    const wallet = await walletService.getAdminWallet(client);
+    const reversalAmount = originalTransaction.amount;
+    const balanceBefore = wallet.balance;
+    const balanceAfter = balanceBefore - reversalAmount;
+
+    if (balanceAfter < 0) {
+      throw new Error(`Cannot reverse: would result in negative balance. Current: ${balanceBefore}, Reversal: ${reversalAmount}`);
+    }
+
+    // Update wallet
+    const updatedWallet = await client.adminWallet.update({
+      where: { id: wallet.id },
+      data: {
+        balance: balanceAfter,
+        totalDeposited: Math.max(0, wallet.totalDeposited - reversalAmount),
+      },
+    });
+
+    // Create reversal transaction record
+    await client.walletTransaction.create({
+      data: {
+        walletType: 'ADMIN_WALLET',
+        adminWalletId: wallet.id,
+        orderId,
+        amount: -reversalAmount, // Negative for reversal
+        type: 'REVERSAL',
+        description: description || `Reversal for cancelled order ${orderId.substring(0, 8).toUpperCase()}`,
+        balanceBefore,
+        balanceAfter,
+        status: 'COMPLETED',
+      },
+    });
+
+    return updatedWallet;
   },
 
   /**

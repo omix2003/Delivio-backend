@@ -59,6 +59,16 @@ export async function sendVerificationOTP(
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 10); // OTP expires in 10 minutes
 
+    // Log OTP for development/testing (only in development mode)
+    console.log('\n========================================');
+    console.log('📧 OTP GENERATED FOR REGISTRATION');
+    console.log('========================================');
+    console.log(`Email: ${email}`);
+    console.log(`Name: ${name}`);
+    console.log(`OTP: ${otp}`);
+    console.log(`Expires at: ${expiresAt.toISOString()}`);
+    console.log('========================================\n');
+
     // Delete any existing unverified OTPs for this email
     await prisma.emailVerification.deleteMany({
       where: {
@@ -91,9 +101,37 @@ export async function sendVerificationOTP(
     };
   } catch (error: any) {
     console.error('Error sending verification OTP:', error);
+    
+    // Handle Prisma errors
+    if (error.code === 'P2002') {
+      // Unique constraint violation
+      const field = error.meta?.target?.[0] || 'field';
+      return {
+        success: false,
+        message: `A user with this ${field} already exists. Please use a different ${field}.`,
+      };
+    }
+    
+    // Handle other Prisma errors
+    if (error.code && error.code.startsWith('P')) {
+      return {
+        success: false,
+        message: 'Database error occurred. Please try again or contact support.',
+      };
+    }
+    
+    // Handle AppError instances
+    if (error.name === 'ConflictError' || error.name === 'AppError') {
+      return {
+        success: false,
+        message: error.message || 'Registration failed',
+      };
+    }
+    
+    // Generic error
     return {
       success: false,
-      message: error.message || 'Failed to send verification OTP',
+      message: error.message || 'Failed to send verification OTP. Please try again.',
     };
   }
 }
@@ -119,6 +157,9 @@ export async function verifyOTPAndCreateUser(
     });
 
     if (!verification) {
+      console.log('❌ OTP VERIFICATION FAILED: Invalid or expired OTP');
+      console.log(`   Email: ${email}`);
+      console.log(`   OTP Provided: ${otp}\n`);
       return {
         success: false,
         message: 'Invalid or expired OTP. Please request a new one.',
@@ -127,6 +168,10 @@ export async function verifyOTPAndCreateUser(
 
     // Check if OTP has expired
     if (new Date() > verification.expiresAt) {
+      console.log('❌ OTP VERIFICATION FAILED: OTP has expired');
+      console.log(`   Email: ${email}`);
+      console.log(`   OTP Provided: ${otp}`);
+      console.log(`   Expired at: ${verification.expiresAt.toISOString()}\n`);
       // Delete expired verification
       await prisma.emailVerification.delete({
         where: { id: verification.id },
@@ -136,6 +181,12 @@ export async function verifyOTPAndCreateUser(
         message: 'OTP has expired. Please request a new one.',
       };
     }
+
+    // Log successful OTP match
+    console.log('✅ OTP VERIFIED SUCCESSFULLY');
+    console.log(`   Email: ${email}`);
+    console.log(`   OTP: ${otp}`);
+    console.log(`   Creating user account...\n`);
 
     // Mark as verified
     await prisma.emailVerification.update({
@@ -180,9 +231,37 @@ export async function verifyOTPAndCreateUser(
     };
   } catch (error: any) {
     console.error('Error verifying OTP:', error);
+    
+    // Handle Prisma errors
+    if (error.code === 'P2002') {
+      // Unique constraint violation
+      const field = error.meta?.target?.[0] || 'field';
+      return {
+        success: false,
+        message: `A user with this ${field} already exists. Please use a different ${field}.`,
+      };
+    }
+    
+    // Handle other Prisma errors
+    if (error.code && error.code.startsWith('P')) {
+      return {
+        success: false,
+        message: 'Database error occurred. Please try again or contact support.',
+      };
+    }
+    
+    // Handle AppError instances
+    if (error.name === 'ConflictError' || error.name === 'AppError') {
+      return {
+        success: false,
+        message: error.message || 'Registration failed',
+      };
+    }
+    
+    // Generic error
     return {
       success: false,
-      message: error.message || 'Failed to verify OTP',
+      message: error.message || 'Failed to verify OTP. Please try again.',
     };
   }
 }
@@ -216,6 +295,16 @@ export async function resendOTP(email: string): Promise<{ success: boolean; mess
     const otp = generateOTP();
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 10);
+
+    // Log OTP resend for development/testing
+    console.log('\n========================================');
+    console.log('📧 OTP RESENT');
+    console.log('========================================');
+    console.log(`Email: ${email}`);
+    console.log(`Name: ${registrationData.name}`);
+    console.log(`New OTP: ${otp}`);
+    console.log(`Expires at: ${expiresAt.toISOString()}`);
+    console.log('========================================\n');
 
     // Update verification with new OTP
     await prisma.emailVerification.update({

@@ -402,6 +402,267 @@ ${data.message}
       `,
     });
   }
+
+  /**
+   * Send weekly payout reminder email to agent
+   * Sent on Sunday, informing about earnings for the week
+   */
+  async sendWeeklyPayoutReminder(data: {
+    email: string;
+    name: string;
+    amount: number;
+    periodStart: Date;
+    periodEnd: Date;
+    orderCount: number;
+    paymentMethod: string;
+    paymentDetails?: string; // UPI ID, Bank Account, etc.
+  }): Promise<boolean> {
+    const logoInfo = await this.getLogoAttachment();
+    const logoPath = path.join(process.cwd(), '..', 'next-app', 'public', 'logo.png');
+    const attachments: MailOptions['attachments'] = [];
+    
+    try {
+      if (fs.existsSync(logoPath)) {
+        attachments.push({
+          filename: 'logo.png',
+          path: logoPath,
+          cid: logoInfo.cid,
+        });
+      }
+    } catch (error) {
+      // Continue without attachment
+    }
+
+    const formatDate = (date: Date): string => {
+      return date.toLocaleDateString('en-IN', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    };
+
+    const formatCurrency = (amount: number): string => {
+      return `₹${amount.toFixed(2)}`;
+    };
+
+    const formatPaymentMethod = (method: string): string => {
+      const methods: Record<string, string> = {
+        'BANK_TRANSFER': 'Bank Transfer',
+        'UPI': 'UPI',
+        'MOBILE_MONEY': 'Mobile Money',
+      };
+      return methods[method] || method;
+    };
+
+    const mondayDate = new Date(data.periodEnd);
+    mondayDate.setDate(mondayDate.getDate() + 1); // Next day (Monday)
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Weekly Payout Reminder - Delivio</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #1F3C88 0%, #2FBF71 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+            <img src="${logoInfo.url}" alt="Delivio Logo" style="max-width: 180px; height: auto; margin-bottom: 15px;" />
+            <h1 style="color: white; margin: 0; font-size: 28px;">Weekly Payout Reminder</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0;">Your earnings summary</p>
+          </div>
+          
+          <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e0e0e0; border-top: none;">
+            <h2 style="color: #333; margin-top: 0;">Hello ${data.name}! 👋</h2>
+            
+            <p>Great news! Here's your weekly earnings summary for the period:</p>
+            
+            <div style="background: white; border-left: 4px solid #2FBF71; padding: 20px; margin: 20px 0; border-radius: 4px;">
+              <p style="margin: 0 0 10px 0; color: #666; font-size: 14px; font-weight: bold;">Period</p>
+              <p style="margin: 0; color: #333; font-size: 16px;">
+                ${formatDate(data.periodStart)} - ${formatDate(data.periodEnd)}
+              </p>
+            </div>
+
+            <div style="background: linear-gradient(135deg, #2FBF71 0%, #1F3C88 100%); padding: 25px; border-radius: 8px; margin: 25px 0; text-align: center;">
+              <p style="margin: 0 0 10px 0; color: rgba(255,255,255,0.9); font-size: 14px;">Total Earnings This Week</p>
+              <h1 style="margin: 0; color: white; font-size: 42px; font-weight: bold;">${formatCurrency(data.amount)}</h1>
+              <p style="margin: 10px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">${data.orderCount} ${data.orderCount === 1 ? 'delivery' : 'deliveries'} completed</p>
+            </div>
+
+            <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 20px; margin: 25px 0;">
+              <div style="display: flex; align-items: center; margin-bottom: 10px;">
+                <span style="font-size: 24px; margin-right: 10px;">💰</span>
+                <h3 style="margin: 0; color: #856404;">Payout Information</h3>
+              </div>
+              <p style="margin: 10px 0; color: #856404;">
+                <strong>Your payout of ${formatCurrency(data.amount)} will be transferred to your preferred payment method on Monday, ${formatDate(mondayDate)}.</strong>
+              </p>
+              <p style="margin: 10px 0 0 0; color: #856404; font-size: 14px;">
+                Payment Method: <strong>${formatPaymentMethod(data.paymentMethod)}</strong>
+                ${data.paymentDetails ? `<br/>Details: <strong>${data.paymentDetails}</strong>` : ''}
+              </p>
+            </div>
+
+            <div style="background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border: 1px solid #e0e0e0;">
+              <h3 style="color: #333; margin-top: 0;">What's Next?</h3>
+              <ul style="color: #666; padding-left: 20px;">
+                <li style="margin-bottom: 8px;">Your earnings will be processed automatically on Monday</li>
+                <li style="margin-bottom: 8px;">You'll receive a confirmation once the transfer is complete</li>
+                <li style="margin-bottom: 8px;">Keep delivering to earn more next week!</li>
+              </ul>
+            </div>
+
+            <p style="color: #666; font-size: 14px; margin-top: 30px;">
+              If you have any questions about your payout, please contact our support team.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 20px; color: #999; font-size: 12px;">
+            <p>&copy; ${new Date().getFullYear()} Delivio. All rights reserved.</p>
+          </div>
+        </body>
+      </html>
+    `;
+
+    return this.sendMail({
+      to: data.email,
+      subject: `Weekly Payout Reminder - ${formatCurrency(data.amount)} | Delivio`,
+      html,
+      attachments,
+    });
+  }
+
+  /**
+   * Send monthly payout reminder email to agent
+   * Sent on Sunday before month-end, informing about earnings for the month
+   */
+  async sendMonthlyPayoutReminder(data: {
+    email: string;
+    name: string;
+    amount: number;
+    periodStart: Date;
+    periodEnd: Date;
+    orderCount: number;
+    paymentMethod: string;
+    paymentDetails?: string; // UPI ID, Bank Account, etc.
+  }): Promise<boolean> {
+    const logoInfo = await this.getLogoAttachment();
+    const logoPath = path.join(process.cwd(), '..', 'next-app', 'public', 'logo.png');
+    const attachments: MailOptions['attachments'] = [];
+    
+    try {
+      if (fs.existsSync(logoPath)) {
+        attachments.push({
+          filename: 'logo.png',
+          path: logoPath,
+          cid: logoInfo.cid,
+        });
+      }
+    } catch (error) {
+      // Continue without attachment
+    }
+
+    const formatDate = (date: Date): string => {
+      return date.toLocaleDateString('en-IN', { 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    };
+
+    const formatCurrency = (amount: number): string => {
+      return `₹${amount.toFixed(2)}`;
+    };
+
+    const formatPaymentMethod = (method: string): string => {
+      const methods: Record<string, string> = {
+        'BANK_TRANSFER': 'Bank Transfer',
+        'UPI': 'UPI',
+        'MOBILE_MONEY': 'Mobile Money',
+      };
+      return methods[method] || method;
+    };
+
+    const mondayDate = new Date(data.periodEnd);
+    mondayDate.setDate(mondayDate.getDate() + 1); // Next day (Monday)
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Monthly Payout Reminder - Delivio</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #1F3C88 0%, #2FBF71 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+            <img src="${logoInfo.url}" alt="Delivio Logo" style="max-width: 180px; height: auto; margin-bottom: 15px;" />
+            <h1 style="color: white; margin: 0; font-size: 28px;">Monthly Payout Reminder</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0;">Your monthly earnings summary</p>
+          </div>
+          
+          <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e0e0e0; border-top: none;">
+            <h2 style="color: #333; margin-top: 0;">Hello ${data.name}! 👋</h2>
+            
+            <p>Excellent work this month! Here's your monthly earnings summary:</p>
+            
+            <div style="background: white; border-left: 4px solid #1F3C88; padding: 20px; margin: 20px 0; border-radius: 4px;">
+              <p style="margin: 0 0 10px 0; color: #666; font-size: 14px; font-weight: bold;">Period</p>
+              <p style="margin: 0; color: #333; font-size: 16px;">
+                ${formatDate(data.periodStart)} - ${formatDate(data.periodEnd)}
+              </p>
+            </div>
+
+            <div style="background: linear-gradient(135deg, #1F3C88 0%, #2FBF71 100%); padding: 25px; border-radius: 8px; margin: 25px 0; text-align: center;">
+              <p style="margin: 0 0 10px 0; color: rgba(255,255,255,0.9); font-size: 14px;">Total Earnings This Month</p>
+              <h1 style="margin: 0; color: white; font-size: 42px; font-weight: bold;">${formatCurrency(data.amount)}</h1>
+              <p style="margin: 10px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">${data.orderCount} ${data.orderCount === 1 ? 'delivery' : 'deliveries'} completed</p>
+            </div>
+
+            <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 20px; margin: 25px 0;">
+              <div style="display: flex; align-items: center; margin-bottom: 10px;">
+                <span style="font-size: 24px; margin-right: 10px;">💰</span>
+                <h3 style="margin: 0; color: #856404;">Payout Information</h3>
+              </div>
+              <p style="margin: 10px 0; color: #856404;">
+                <strong>Your payout of ${formatCurrency(data.amount)} will be transferred to your preferred payment method on Monday, ${formatDate(mondayDate)}.</strong>
+              </p>
+              <p style="margin: 10px 0 0 0; color: #856404; font-size: 14px;">
+                Payment Method: <strong>${formatPaymentMethod(data.paymentMethod)}</strong>
+                ${data.paymentDetails ? `<br/>Details: <strong>${data.paymentDetails}</strong>` : ''}
+              </p>
+            </div>
+
+            <div style="background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border: 1px solid #e0e0e0;">
+              <h3 style="color: #333; margin-top: 0;">What's Next?</h3>
+              <ul style="color: #666; padding-left: 20px;">
+                <li style="margin-bottom: 8px;">Your monthly earnings will be processed automatically on Monday</li>
+                <li style="margin-bottom: 8px;">You'll receive a confirmation once the transfer is complete</li>
+                <li style="margin-bottom: 8px;">Keep up the great work and continue earning!</li>
+              </ul>
+            </div>
+
+            <p style="color: #666; font-size: 14px; margin-top: 30px;">
+              If you have any questions about your payout, please contact our support team.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 20px; color: #999; font-size: 12px;">
+            <p>&copy; ${new Date().getFullYear()} Delivio. All rights reserved.</p>
+          </div>
+        </body>
+      </html>
+    `;
+
+    return this.sendMail({
+      to: data.email,
+      subject: `Monthly Payout Reminder - ${formatCurrency(data.amount)} | Delivio`,
+      html,
+      attachments,
+    });
+  }
 }
 
 export const mailService = new MailService();

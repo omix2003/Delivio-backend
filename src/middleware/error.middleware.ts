@@ -146,11 +146,21 @@ export const errorHandler=(
         query: req.query,
     });
 
-    const errorResponse= formatError(err);
+    const errorResponse = formatError(err);
     // Handle both AppError and PayoutError (which has statusCode)
-    const statusCode= err instanceof AppError || err instanceof PayoutError 
+    const statusCode = err instanceof AppError || err instanceof PayoutError 
       ? (err.statusCode || (err as any).statusCode || 500)
       : 500;
+    
+    // Ensure errorResponse always has error and message fields
+    if (!errorResponse.error || !errorResponse.message) {
+        console.error('[Error Middleware] Error response is missing required fields, using defaults:', {
+            originalResponse: errorResponse,
+            errorKeys: Object.keys(errorResponse),
+        });
+        errorResponse.error = errorResponse.error || 'Internal Server Error';
+        errorResponse.message = errorResponse.message || (err?.message || 'An unexpected error occurred');
+    }
     
     // Log the error response being sent (for debugging)
     console.error('[Error Middleware] Sending error response:', {

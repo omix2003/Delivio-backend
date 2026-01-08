@@ -1280,6 +1280,37 @@ export const adminController = {
           throw new Error('Order not found');
         }
 
+        // If order was delivered, reverse wallet credits and revenue
+        if (currentOrder.status === 'DELIVERED') {
+          try {
+            const { walletService } = await import('../services/wallet.service');
+            const { revenueService } = await import('../services/revenue.service');
+
+            // Reverse agent wallet credit
+            if (currentOrder.agentId) {
+              await walletService.reverseAgentWalletCredit(
+                currentOrder.agentId,
+                id,
+                `Reversal for cancelled delivered order ${id.substring(0, 8).toUpperCase()}`,
+                tx
+              );
+            }
+
+            // Reverse admin wallet credit
+            await walletService.reverseAdminWalletCredit(
+              id,
+              `Reversal for cancelled delivered order ${id.substring(0, 8).toUpperCase()}`,
+              tx
+            );
+
+            // Reverse platform revenue record
+            await revenueService.reversePlatformRevenue(id, tx);
+          } catch (reversalError: any) {
+            logger.error('[Admin Controller] Error reversing wallet credits for cancelled delivered order', reversalError, { orderId: id });
+            // Continue with cancellation even if reversal fails, but log it
+          }
+        }
+
         // If order is assigned, free the agent
         if (currentOrder.agentId) {
           await tx.agent.update({
@@ -1302,6 +1333,9 @@ export const adminController = {
         });
 
         return updatedOrder;
+      }, {
+        isolationLevel: 'Serializable',
+        timeout: 30000,
       });
 
       // Notify partner

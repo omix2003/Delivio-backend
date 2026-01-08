@@ -42,4 +42,3 @@ export const getPartnerId= (req:Request): string | null =>{
 export const getLogisticsProviderId = (req: Request): string | null => {
     return req.user?.logisticsProviderId || null;
 };
-

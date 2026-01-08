@@ -42,6 +42,20 @@ enum PartnerCategory {
   LOCAL_STORE
   FOOD_DELIVERY
   LOGISTICS_PROVIDER
+  ENTERPRISE
+  RURAL_PARTNER
+}
+
+enum BillingMode {
+  INVOICE
+  WALLET
+  CONTRACT
+}
+
+enum BillingCycle {
+  DAILY
+  WEEKLY
+  MONTHLY
 }
 
 enum SLAPriority {
@@ -262,6 +276,10 @@ model Partner {
   platformRevenues PlatformRevenue[]
   warehouses       Warehouse[] // Warehouses owned by this partner (for seller warehouses)
   restaurants      Restaurant[] // Restaurants owned by this partner (for food delivery)
+  invoices         PartnerInvoice[]
+  billingConfig    PartnerBillingConfig?
+  wallet           PartnerWallet?
+  walletTransactions PartnerWalletTransaction[]
 
   @@index([apiKey])
   @@index([isActive])
@@ -293,6 +311,7 @@ model LogisticsProvider {
   logisticsAgents  LogisticsAgent[]
   logisticsOrders Order[]             @relation("LogisticsOrders")
   tickets          SupportTicket[]
+  settlements      ProviderSettlement[]
 
   @@index([apiKey])
   @@index([isActive])
@@ -373,6 +392,15 @@ model Order {
   slaPriority     SLAPriority? // EXPRESS (10-60 min) or STANDARD
   distanceKm      Float? // Calculated distance for pricing
 
+  // Billing fields (for invoicing)
+  partnerCharge   Float? // Final amount partner is invoiced (includes all legs + margin)
+  providerCharge  Float? // Amount logistics provider charges for Leg 2 (warehouse → warehouse)
+  leg1Cost        Float? // Internal cost for Leg 1 (seller → origin warehouse)
+  leg3Cost        Float? // Internal cost for Leg 3 (destination warehouse → customer)
+  platformMargin  Float? // Platform margin added to partner charge
+  isRTO           Boolean @default(false) // Whether this is an RTO order
+  rtoCharge       Float? // Additional RTO charge if applicable
+
   // Barcode/QR Code fields
   barcode String? @unique // Barcode for scanning
   qrCode  String? @unique // QR code for scanning
@@ -424,6 +452,9 @@ model Order {
   logisticsAgent     LogisticsAgent?     @relation("LogisticsAgentOrders", fields: [logisticsAgentId], references: [id], onDelete: SetNull)
   originWarehouse    Warehouse?          @relation("OriginWarehouse", fields: [originWarehouseId], references: [id], onDelete: SetNull)
   currentWarehouse   Warehouse?          @relation("CurrentWarehouse", fields: [currentWarehouseId], references: [id], onDelete: SetNull)
+  partnerInvoices    PartnerInvoiceItem[]
+  providerSettlements ProviderSettlementItem[]
+  partnerWalletTransactions PartnerWalletTransaction[] @relation("PartnerWalletTransactions")
 
   @@index([partnerId])
   @@index([pickupWarehouseId])
@@ -650,7 +681,7 @@ model PlatformRevenue {
   agentPayout Float // Amount paid to agent
   netRevenue  Float // platformFee (platform keeps this)
   revenueType String // COMMISSION, SERVICE_FEE, SUBSCRIPTION
-  status      String    @default("PENDING") // PENDING, PROCESSED, FAILED
+  status      String    @default("PENDING") // PENDING, PROCESSED, FAILED, REVERSED
   processedAt DateTime?
   periodStart DateTime  @db.Date // For aggregation
   periodEnd   DateTime  @db.Date
@@ -894,4 +925,180 @@ model SystemSettings {
   updatedBy           String?
 
   @@map("SystemSettings")
+}
+
+// Partner Invoice - Consolidated invoice to partners
+model PartnerInvoice {
+  id              String   @id @default(cuid())
+  invoiceNumber   String   @unique // Format: INV-{PARTNER_CODE}-{SEQUENCE}
+  partnerId       String
+  partnerType     PartnerCategory // Denormalized for filtering
+  billingPeriodStart DateTime @db.Date
+  billingPeriodEnd   DateTime @db.Date
+  totalAmount     Float    // Total amount partner owes
+  currency        String   @default("INR")
+  status          String   @default("DRAFT") // DRAFT, SENT, ACKNOWLEDGED, PAID, OVERDUE, CANCELLED
+  paymentTerms    String   @default("NET_7") // NET_7, NET_15, NET_30
+  dueDate         DateTime?
+  paidAt          DateTime?
+  notes           String?  // Additional notes
+  metadata        Json?    // Additional metadata (tax details, adjustments, etc.)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  sentAt          DateTime? // When invoice was sent to partner
+  acknowledgedAt  DateTime? // When partner acknowledged invoice
+
+  // Relations
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  items   PartnerInvoiceItem[]
+
+  @@index([partnerId])
+  @@index([invoiceNumber])
+  @@index([status])
+  @@index([partnerType])
+  @@index([billingPeriodStart, billingPeriodEnd])
+  @@index([dueDate])
+}
+
+// Partner Invoice Items - Individual orders in invoice
+model PartnerInvoiceItem {
+  id              String   @id @default(cuid())
+  invoiceId       String
+  orderId         String   @unique
+  orderNumber     String   // Order ID for display
+  route           String?  // e.g., "BLR → PUNE"
+  serviceType     String   @default("Multi-leg E-commerce") // SINGLE_LEG, MULTI_LEG, RTO - Service type description
+  amount          Float    // Amount for this order (from order.partnerCharge)
+  createdAt       DateTime @default(now())
+
+  // Relations
+  invoice PartnerInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  order   Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@index([orderId])
+}
+
+// Provider Settlement - Reconciliation with logistics providers
+model ProviderSettlement {
+  id              String   @id @default(cuid())
+  settlementNumber String  @unique // Format: SETTLE-{PROVIDER_CODE}-{SEQUENCE}
+  logisticsProviderId String
+  billingPeriodStart DateTime @db.Date
+  billingPeriodEnd   DateTime @db.Date
+  totalAmount     Float    // Total amount owed to provider (Leg 2 only)
+  currency        String   @default("INR")
+  status          String   @default("PENDING") // PENDING, RECONCILED, DISPUTED, PAID, CANCELLED
+  providerInvoiceNumber String? // Provider's invoice number
+  providerInvoiceDate   DateTime? // Date of provider's invoice
+  reconciledAt    DateTime? // When reconciliation completed
+  paidAt           DateTime? // When payment was made
+  disputeReason    String?  // If status is DISPUTED
+  adjustments      Json?    // Adjustments (SLA breaches, delays, etc.)
+  notes            String?  // Additional notes
+  metadata         Json?    // Additional metadata
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  logisticsProvider LogisticsProvider @relation(fields: [logisticsProviderId], references: [id], onDelete: Cascade)
+  items              ProviderSettlementItem[]
+
+  @@index([logisticsProviderId])
+  @@index([settlementNumber])
+  @@index([status])
+  @@index([billingPeriodStart, billingPeriodEnd])
+}
+
+// Provider Settlement Items - Individual Leg 2 orders
+model ProviderSettlementItem {
+  id                String   @id @default(cuid())
+  settlementId      String
+  orderId           String   @unique
+  shipmentRef       String   // Order ID or tracking number
+  originWarehouse   String?  // Origin warehouse name/code
+  destWarehouse     String?  // Destination warehouse name/code
+  amount            Float    // Amount for this Leg 2 shipment
+  hasSlaBreach      Boolean  @default(false) // Whether Leg 2 had SLA breach
+  adjustmentAmount  Float?   // Adjustment amount if applicable
+  createdAt         DateTime @default(now())
+
+  // Relations
+  settlement ProviderSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+  order      Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([settlementId])
+  @@index([orderId])
+}
+
+// Partner Billing Configuration - Defines billing behavior per partner type
+model PartnerBillingConfig {
+  id                String        @id @default(cuid())
+  partnerId         String        @unique
+  partnerType       PartnerCategory
+  billingMode       BillingMode   @default(INVOICE)
+  billingCycle      BillingCycle  @default(WEEKLY)
+  creditPeriodDays  Int           @default(7) // Net-7, Net-15, Net-30
+  creditLimit       Float?        // Credit limit for QUICK_COMMERCE
+  minWalletBalance  Float?        @default(0) // Minimum balance for LOCAL_STORE
+  contractStartDate DateTime?      // For ENTERPRISE contracts
+  contractEndDate   DateTime?      // For ENTERPRISE contracts
+  contractPricing   Json?          // Contract-based pricing rules for ENTERPRISE
+  slaPenalties      Json?          // SLA penalty rules for ENTERPRISE
+  slaBonuses        Json?          // SLA bonus rules for ENTERPRISE
+  isActive          Boolean        @default(true)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  // Relations
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@index([partnerId])
+  @@index([partnerType])
+  @@index([billingCycle])
+}
+
+// Partner Wallet - For LOCAL_STORE partners using wallet-based billing
+model PartnerWallet {
+  id            String   @id @default(cuid())
+  partnerId     String   @unique
+  balance       Float    @default(0)
+  reserved      Float    @default(0) // Reserved for pending orders
+  currency      String   @default("INR")
+  lastTopUpAt   DateTime?
+  lastTopUpAmount Float?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  transactions PartnerWalletTransaction[]
+
+  @@index([partnerId])
+}
+
+// Partner Wallet Transactions - Audit trail for wallet operations
+model PartnerWalletTransaction {
+  id            String   @id @default(cuid())
+  partnerId     String
+  walletId      String
+  type          String   // TOPUP, DEDUCTION, REFUND, ADJUSTMENT
+  amount        Float
+  balanceBefore Float
+  balanceAfter  Float
+  orderId       String?  // If transaction is related to an order
+  description   String?
+  metadata      Json?    // Additional transaction details
+  createdAt     DateTime @default(now())
+
+  // Relations
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  wallet  PartnerWallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  order   Order?       @relation("PartnerWalletTransactions", fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([partnerId])
+  @@index([walletId])
+  @@index([orderId])
+  @@index([type])
+  @@index([createdAt])
 }

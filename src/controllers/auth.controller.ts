@@ -84,7 +84,8 @@ export const authController = {
 
       if (!result.success) {
         return res.status(400).json({
-          error: result.message,
+          error: 'Registration Failed',
+          message: result.message || 'Failed to send verification OTP. Please try again.',
         });
       }
 
@@ -92,7 +93,16 @@ export const authController = {
         message: result.message,
         email,
       });
-    } catch (error) {
+    } catch (error: any) {
+      // Log the error for debugging
+      console.error('[Auth Controller] Error in register:', {
+        message: error?.message,
+        code: error?.code,
+        name: error?.name,
+        stack: error?.stack,
+      });
+      
+      // If it's already a formatted error, pass it to the error handler
       next(error);
     }
   },
@@ -271,20 +281,31 @@ export const authController = {
       if (!email || !otp) {
         return res.status(400).json({
           error: 'Email and OTP are required',
+          message: 'Please provide both email and OTP to verify your account',
         });
       }
+
+      // Log OTP verification attempt
+      console.log('\n========================================');
+      console.log('🔐 OTP VERIFICATION ATTEMPT');
+      console.log('========================================');
+      console.log(`Email: ${email}`);
+      console.log(`OTP Provided: ${otp}`);
+      console.log('========================================\n');
 
       const result = await emailVerificationService.verifyOTPAndCreateUser(email, otp);
 
       if (!result.success) {
         return res.status(400).json({
-          error: result.message,
+          error: 'Verification Failed',
+          message: result.message || 'OTP verification failed. Please try again.',
         });
       }
 
       if (!result.user) {
         return res.status(500).json({
-          error: 'User creation failed',
+          error: 'User Creation Failed',
+          message: 'User account could not be created. Please try again or contact support.',
         });
       }
 
@@ -315,7 +336,16 @@ export const authController = {
         },
         token,
       });
-    } catch (error) {
+    } catch (error: any) {
+      // Log the error for debugging
+      console.error('[Auth Controller] Error in verifyOTP:', {
+        message: error?.message,
+        code: error?.code,
+        name: error?.name,
+        stack: error?.stack,
+      });
+      
+      // If it's already a formatted error, pass it to the error handler
       next(error);
     }
   },

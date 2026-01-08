@@ -6,6 +6,7 @@ import { notifyPartner } from '../lib/webhook';
 import { notifyPartnerOrderStatusUpdate, notifyAgentOrderStatusUpdate } from '../lib/websocket';
 import { EventType, ActorType, OrderStatus, PartnerCategory } from '@prisma/client';
 import { eventService } from '../services/event.service';
+import { logger } from '../lib/logger';
 import path from 'path';
 import fs from 'fs';
 
@@ -1319,77 +1320,132 @@ export const agentController = {
             updateData.actualDuration = duration;
           }
           
-          // Update order status first so revenue calculation works
-          await prisma.order.update({
-            where: { id: orderId },
-            data: updateData,
-          });
+          // Wrap order delivery and wallet operations in a single transaction
+          // This ensures atomicity and prevents double crediting
+          const { walletService } = await import('../services/wallet.service');
+          const { revenueService } = await import('../services/revenue.service');
           
-          // Credit wallets directly based on 70/30 split
-          try {
-            const { walletService } = await import('../services/wallet.service');
-            const { revenueService } = await import('../services/revenue.service');
-            
+          const updatedOrder = await prisma.$transaction(async (tx) => {
+            // Check if order was already processed (idempotency check)
+            const existingRevenue = await tx.platformRevenue.findUnique({
+              where: { orderId },
+            });
+
+            if (existingRevenue && existingRevenue.status === 'PROCESSED') {
+              // Order already processed, return existing order
+              const existingOrder = await tx.order.findUnique({
+                where: { id: orderId },
+                select: {
+                  id: true,
+                  status: true,
+                  deliveredAt: true,
+                  actualDuration: true,
+                  partnerId: true,
+                },
+              });
+              if (existingOrder) {
+                return existingOrder;
+              }
+            }
+
+            // Update order status first so revenue calculation works
+            await tx.order.update({
+              where: { id: orderId },
+              data: updateData,
+            });
+
             // Calculate revenue for this order (70/30 split)
-            // Now the order status is DELIVERED, so this will work
-            const revenue = await revenueService.calculateOrderRevenue(orderId);
+            const revenue = await revenueService.calculateOrderRevenue(orderId, tx);
             
-            // Credit agent wallet with 70% (payoutAmount)
-            await walletService.creditAgentWallet(
-              agentId,
-              revenue.deliveryFee, // 70% of orderAmount
-              orderId,
-              `Earning from order ${orderId.substring(0, 8).toUpperCase()} (70% of order)`
-            );
+            // Credit agent wallet with 70% (payoutAmount) - only if not already processed
+            if (!existingRevenue) {
+              await walletService.creditAgentWallet(
+                agentId,
+                revenue.deliveryFee, // 70% of orderAmount
+                orderId,
+                `Earning from order ${orderId.substring(0, 8).toUpperCase()} (70% of order)`,
+                tx
+              );
 
-            // Credit admin wallet with 30% commission
-            await walletService.creditAdminWallet(
-              revenue.platformFee, // 30% of orderAmount
-              orderId,
-              `Commission from order ${orderId.substring(0, 8).toUpperCase()} (30% of order)`
-            );
+              // Credit admin wallet with 30% commission
+              await walletService.creditAdminWallet(
+                revenue.platformFee, // 30% of orderAmount
+                orderId,
+                `Commission from order ${orderId.substring(0, 8).toUpperCase()} (30% of order)`,
+                tx
+              );
 
-            // Create platform revenue record
-            const now = new Date();
-            const periodStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-            const periodEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
-            
-            await revenueService.createPlatformRevenue(
-              orderId,
-              order.partnerId,
-              agentId,
-              periodStart,
-              periodEnd,
-              'DAILY'
-            );
-          } catch (walletError: any) {
-            console.error('[Agent Controller] Error crediting wallets:', walletError?.message);
-            console.error('[Agent Controller] Wallet error stack:', walletError?.stack);
-            // Don't fail the order update if wallet credit fails
+              // Create platform revenue record
+              const now = new Date();
+              const periodStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+              const periodEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+              
+              try {
+                await revenueService.createPlatformRevenue(
+                  orderId,
+                  order.partnerId,
+                  agentId,
+                  periodStart,
+                  periodEnd,
+                  'DAILY',
+                  tx
+                );
+              } catch (revenueError: any) {
+                // Log error but don't fail transaction - revenue record creation failure shouldn't block delivery
+                logger.error('[Agent Controller] Failed to create platform revenue record', revenueError, {
+                  orderId,
+                  agentId,
+                  partnerId: order.partnerId,
+                });
+                // Note: Wallets are already credited, so this is just a record-keeping issue
+                // The transaction will still complete, but revenue reporting may be incomplete
+              }
+            }
+
+            // Update agent stats
+            await tx.agent.update({
+              where: { id: agentId },
+              data: {
+                completedOrders: { increment: 1 },
+                totalOrders: { increment: 1 },
+                currentOrderId: null,
+                status: 'ONLINE', // Back to online after delivery
+              },
+            });
+
+            // Return updated order
+            return await tx.order.findUnique({
+              where: { id: orderId },
+              select: {
+                id: true,
+                status: true,
+                deliveredAt: true,
+                actualDuration: true,
+                partnerId: true,
+              },
+            });
+          }, {
+            isolationLevel: 'Serializable',
+            timeout: 30000,
+          });
+
+          // Calculate and store billing amounts (for invoicing) - outside transaction
+          try {
+            const { billingService } = await import('../services/billing.service');
+            await billingService.updateOrderBilling(orderId);
+          } catch (billingError: any) {
+            console.error('[Agent Controller] Error calculating billing:', billingError?.message);
+            // Don't fail the order update if billing calculation fails
           }
-          
-          // Update agent stats
-          await prisma.agent.update({
-            where: { id: agentId },
-            data: {
-              completedOrders: { increment: 1 },
-              totalOrders: { increment: 1 },
-              currentOrderId: null,
-              status: 'ONLINE', // Back to online after delivery
-            },
-          });
-          
-          // Return early since we already updated the order
-          const updatedOrder = await prisma.order.findUnique({
-            where: { id: orderId },
-            select: {
-              id: true,
-              status: true,
-              deliveredAt: true,
-              actualDuration: true,
-              partnerId: true,
-            },
-          });
+
+          // Deduct from wallet if LOCAL_STORE partner (wallet-based billing) - outside transaction
+          try {
+            const { partnerWalletService } = await import('../services/partner-wallet.service');
+            await partnerWalletService.deductOnDelivery(orderId);
+          } catch (walletError: any) {
+            console.error('[Agent Controller] Error deducting from wallet:', walletError?.message);
+            // Don't fail the order update if wallet deduction fails, but log it
+          }
 
           if (updatedOrder) {
             // Notify partner via WebSocket for real-time updates
@@ -1424,6 +1480,53 @@ export const agentController = {
       if (status === 'CANCELLED') {
         updateData.cancelledAt = new Date();
         updateData.cancellationReason = cancellationReason;
+        
+        // EDGE CASE 4: Leg 3 delivery failure (customer unavailable, etc.)
+        // Check if this is a Leg 3 order (final delivery from warehouse to customer)
+        const orderForRTO = await prisma.order.findUnique({
+          where: { id: orderId },
+          select: {
+            id: true,
+            transitLegs: true,
+            pickupWarehouseId: true,
+            logisticsProviderId: true,
+            currentWarehouseId: true,
+            originWarehouseId: true,
+            status: true,
+          },
+        });
+
+        if (orderForRTO) {
+          const transitLegs = orderForRTO.transitLegs as any;
+          const isLeg3Order = transitLegs?.leg === 'FINAL_DELIVERY' || 
+                            transitLegs?.parentOrderId || 
+                            (orderForRTO.pickupWarehouseId && 
+                             orderForRTO.status !== 'IN_TRANSIT' && 
+                             orderForRTO.status !== 'AT_WAREHOUSE');
+
+          // If this is Leg 3 and order is at destination warehouse, create RTO
+          // Standard retry → RTO, do NOT reopen Leg 2
+          if (isLeg3Order && orderForRTO.pickupWarehouseId) {
+            try {
+              const { logisticsOrderService } = await import('../services/logistics-order.service');
+              // Extract parentOrderId from transitLegs (properly typed)
+              const parentOrderId = (transitLegs && typeof transitLegs === 'object' && transitLegs !== null && 'parentOrderId' in transitLegs)
+                ? (transitLegs as { parentOrderId?: string }).parentOrderId || orderId
+                : orderId;
+              
+              await logisticsOrderService.createRTOOrder(
+                parentOrderId, // Use parent order ID if available
+                cancellationReason || 'Leg 3 delivery failed - customer unavailable',
+                orderForRTO.pickupWarehouseId // Current warehouse (destination)
+              );
+              console.log(`[Agent Controller] Created RTO order for failed Leg 3 delivery ${orderId}`);
+            } catch (error: any) {
+              console.error(`[Agent Controller] Failed to create RTO order for Leg 3 failure:`, error);
+              // Continue with cancellation even if RTO creation fails
+            }
+          }
+        }
+
         // Update agent stats
         await prisma.agent.update({
           where: { id: agentId },

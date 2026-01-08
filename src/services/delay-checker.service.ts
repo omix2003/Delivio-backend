@@ -3,6 +3,11 @@ import { OrderStatus } from '@prisma/client';
 
 /**
  * Service to check for delayed orders and update their status
+ * 
+ * EDGE CASE HANDLING:
+ * - Case 1: Logistics provider delays (IN_TRANSIT with delayLeg = MIDDLE_MILE)
+ *   - Track delayLeg = MIDDLE_MILE in transitLegs
+ *   - SLA breach belongs to provider, partner NOT charged extra
  */
 export const delayCheckerService = {
   /**
@@ -10,6 +15,7 @@ export const delayCheckerService = {
    */
   async checkDelayedOrders() {
     try {
+      // Check regular delivery orders (PICKED_UP, OUT_FOR_DELIVERY)
       const activeOrders = await prisma.order.findMany({
         where: {
           status: {
@@ -27,12 +33,33 @@ export const delayCheckerService = {
           pickedUpAt: true,
           estimatedDuration: true,
           status: true,
+          transitLegs: true,
+        },
+      });
+
+      // Check logistics orders in transit (IN_TRANSIT) - Case 1: Provider delays
+      const inTransitOrders = await prisma.order.findMany({
+        where: {
+          status: OrderStatus.IN_TRANSIT,
+          logisticsProviderId: {
+            not: null,
+          },
+        },
+        select: {
+          id: true,
+          status: true,
+          transitLegs: true,
+          expectedWarehouseArrival: true,
+          warehouseArrivedAt: true,
+          logisticsProviderId: true,
         },
       });
 
       const now = new Date();
       const delayedOrders: string[] = [];
+      const providerDelayedOrders: string[] = [];
 
+      // Check regular delivery orders
       for (const order of activeOrders) {
         if (!order.pickedUpAt || !order.estimatedDuration) continue;
 
@@ -50,9 +77,57 @@ export const delayCheckerService = {
         }
       }
 
-      // Orders marked as delayed
+      // Case 1: Check logistics provider delays (IN_TRANSIT orders)
+      // Track delayLeg = MIDDLE_MILE, SLA breach belongs to provider
+      for (const order of inTransitOrders) {
+        const transitLegs = order.transitLegs as any;
+        const leg2 = Array.isArray(transitLegs) ? transitLegs.find((leg: any) => leg.leg === 2) : null;
+        
+        // Check if Leg 2 has exceeded expected arrival time
+        if (order.expectedWarehouseArrival && !order.warehouseArrivedAt) {
+          const expectedArrival = new Date(order.expectedWarehouseArrival);
+          const isDelayed = now > expectedArrival;
+          
+          if (isDelayed && leg2 && leg2.delayLeg !== 'MIDDLE_MILE') {
+            // Mark delayLeg = MIDDLE_MILE in transitLegs
+            const updatedLegs = Array.isArray(transitLegs) ? [...transitLegs] : [];
+            const leg2Index = updatedLegs.findIndex((leg: any) => leg.leg === 2);
+            
+            if (leg2Index >= 0) {
+              updatedLegs[leg2Index] = {
+                ...leg2,
+                delayLeg: 'MIDDLE_MILE',
+                delayedAt: now.toISOString(),
+                delayReason: 'Logistics provider delay',
+              };
+            } else if (leg2) {
+              updatedLegs.push({
+                ...leg2,
+                delayLeg: 'MIDDLE_MILE',
+                delayedAt: now.toISOString(),
+                delayReason: 'Logistics provider delay',
+              });
+            }
 
-      return { checked: activeOrders.length, delayed: delayedOrders.length };
+            await prisma.order.update({
+              where: { id: order.id },
+              data: {
+                transitLegs: updatedLegs as any,
+                // Note: Partner is NOT charged extra - delay is provider's responsibility
+              },
+              select: { id: true },
+            });
+            
+            providerDelayedOrders.push(order.id);
+          }
+        }
+      }
+
+      return { 
+        checked: activeOrders.length + inTransitOrders.length, 
+        delayed: delayedOrders.length,
+        providerDelayed: providerDelayedOrders.length,
+      };
     } catch (error) {
       console.error('[Delay Checker] Error checking delayed orders:', error);
       throw error;

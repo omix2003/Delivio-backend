@@ -60,17 +60,29 @@ export const revenueService = {
       }
     }
 
-    // Agent payout = 70% of partnerPayment
-    // Use the actual payoutAmount from order, or calculate as 70% of partnerPayment
-    const agentPayout = order.payoutAmount || (partnerPayment * 0.70);
+    // Validate consistency between orderAmount and payoutAmount if both exist
+    if (order.orderAmount && order.payoutAmount) {
+      const expectedPayoutAmount = order.orderAmount * 0.70;
+      const tolerance = 0.01; // Allow 1 cent tolerance for rounding
+      const difference = Math.abs(order.payoutAmount - expectedPayoutAmount);
+      
+      if (difference > tolerance) {
+        console.warn(
+          `[Revenue Service] Order ${orderId.substring(0, 8)} has inconsistent amounts. ` +
+          `orderAmount: ${order.orderAmount}, payoutAmount: ${order.payoutAmount}, expected: ${expectedPayoutAmount.toFixed(2)}`
+        );
+        // Use orderAmount as source of truth and recalculate payoutAmount
+        partnerPayment = order.orderAmount;
+      }
+    }
 
-    // Admin commission = 30% of partnerPayment (or partnerPayment - agentPayout)
-    const adminCommission = partnerPayment - agentPayout;
-
-    // Ensure the split is correct (70/30)
-    // If there's a discrepancy, recalculate based on partnerPayment
+    // Calculate expected values based on 70/30 split
     const expectedAgentPayout = partnerPayment * 0.70;
     const expectedAdminCommission = partnerPayment * 0.30;
+
+    // Use expected values for consistency (ignore stored payoutAmount if inconsistent)
+    const agentPayout = expectedAgentPayout;
+    const adminCommission = expectedAdminCommission;
 
     return {
       orderAmount: partnerPayment,           // What partner pays (100%)
@@ -388,6 +400,35 @@ export const revenueService = {
       },
       orderBy: {
         createdAt: 'desc',
+      },
+    });
+  },
+
+  /**
+   * Reverse platform revenue (for cancelled delivered orders)
+   */
+  reversePlatformRevenue: async (
+    orderId: string,
+    tx?: Prisma.TransactionClient
+  ) => {
+    const client = tx || prisma;
+    
+    // Find existing platform revenue record
+    const existing = await client.platformRevenue.findUnique({
+      where: { orderId },
+    });
+
+    if (!existing || existing.status !== 'PROCESSED') {
+      // No revenue to reverse
+      return null;
+    }
+
+    // Mark as reversed
+    return await client.platformRevenue.update({
+      where: { id: existing.id },
+      data: {
+        status: 'REVERSED',
+        processedAt: new Date(),
       },
     });
   },

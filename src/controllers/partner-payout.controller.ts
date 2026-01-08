@@ -132,12 +132,17 @@ export const partnerPayoutController = {
           partnerPayment = order.payoutAmount / 0.70;
         }
 
+        // Always calculate agentPayout as 70% of partnerPayment to ensure consistency
+        // Don't use stored payoutAmount directly as it might be incorrect/outdated
+        const agentPayout = partnerPayment ? partnerPayment * 0.70 : 0;
+        const platformFee = partnerPayment ? partnerPayment * 0.30 : 0;
+
         return {
           id: order.id,
           orderId: order.id,
           amount: partnerPayment || 0, // What partner paid
-          agentPayout: order.payoutAmount || (partnerPayment ? partnerPayment * 0.70 : 0), // What agent got (70%)
-          platformFee: partnerPayment ? partnerPayment * 0.30 : 0, // What platform got (30%)
+          agentPayout, // What agent got (70% of partnerPayment)
+          platformFee, // What platform got (30% of partnerPayment)
           deliveredAt: order.deliveredAt,
           createdAt: order.createdAt,
           agent: order.agent,

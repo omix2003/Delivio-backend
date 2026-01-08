@@ -59,27 +59,74 @@ export const authService = {
     // Hash password
     const passwordHash = await bcrypt.hash(data.password, 10);
 
-    // Generate user ID based on role
+    // Generate user ID based on role with retry logic for race conditions
     const userPrefix = getUserPrefix(data.role);
-    const userId = await generateId(userPrefix);
+    let userId: string;
+    let user: any;
+    let attempts = 0;
+    const maxAttempts = 5;
 
-    // Create user
-    const user = await prisma.user.create({
-      data: {
-        id: userId,
-        name: data.name,
-        email: data.email,
-        phone: data.phone,
-        passwordHash,
-        role: data.role,
-        emailVerified: data.role === UserRole.ADMIN ? new Date() : null,
-        phoneVerified: false,
-      },
-      include: {
-        agent: true,
-        partner: true,
-      },
-    });
+    while (attempts < maxAttempts) {
+      try {
+        userId = await generateId(userPrefix);
+        
+        // Create user
+        user = await prisma.user.create({
+          data: {
+            id: userId,
+            name: data.name,
+            email: data.email,
+            phone: data.phone,
+            passwordHash,
+            role: data.role,
+            emailVerified: data.role === UserRole.ADMIN ? new Date() : null,
+            phoneVerified: false,
+          },
+          include: {
+            agent: true,
+            partner: true,
+          },
+        });
+        
+        // Success, break out of retry loop
+        break;
+      } catch (error: any) {
+        // If it's a unique constraint violation on ID, retry with a new ID
+        if (error.code === 'P2002' && error.meta?.target?.includes('id')) {
+          attempts++;
+          if (attempts >= maxAttempts) {
+            // If all retries failed, generate a truly unique ID with timestamp
+            const timestamp = Date.now().toString().slice(-6);
+            const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+            userId = `${userPrefix}${timestamp}${random}`;
+            
+            // Final attempt with timestamp-based ID
+            user = await prisma.user.create({
+              data: {
+                id: userId,
+                name: data.name,
+                email: data.email,
+                phone: data.phone,
+                passwordHash,
+                role: data.role,
+                emailVerified: data.role === UserRole.ADMIN ? new Date() : null,
+                phoneVerified: false,
+              },
+              include: {
+                agent: true,
+                partner: true,
+              },
+            });
+            break;
+          }
+          // Wait a bit before retrying (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, 50 * attempts));
+          continue;
+        }
+        // If it's a different error (like duplicate email/phone), throw it
+        throw error;
+      }
+    }
 
     // Create role-specific records if needed
     if (data.role === UserRole.PARTNER) {
